@@ -8,6 +8,9 @@ import { appHome, exec, focused, hc, home, layout, nextCommand, notify, run, ter
 //   new-space                Ctrl+n: a new space in ~/Projects (keys.json can't pass `folder`)
 //   nav-up|nav-down          Ctrl+w/s: the previous/next space; past the last space, down into the
 //                            Pull requests list (t3-prs), but only while that list shows
+// It also puts scripts/toast-external.js over the shipped toast mod at each start, so
+// notifications show outside the app (Herdr restores shipped mods at start and keeps the edit
+// as mods/toast-edited*, which this removes).
 
 const VIM = /^g?(view|n?vim?x?)(diff)?$/i;
 const KEY = { left: "ctrl+h", down: "ctrl+j", up: "ctrl+k", right: "ctrl+l" };
@@ -51,6 +54,8 @@ async function balance() {
 
 export default class TmuxKeys extends View {
   init(_props, cx) {
+    exec("/bin/sh", ["-c", 'cd "$1" && { cmp -s scripts/toast-external.js mods/toast/main.js || cp scripts/toast-external.js mods/toast/main.js; } && rm -rf mods/toast-edited*', "sh", appHome()])
+      .catch((e) => notify({ title: "Could not install the external toast", body: String(e), level: "error" }));
     cx.spawn(async () => {
       for (;;) {
         const c = await nextCommand();

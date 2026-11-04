@@ -1,0 +1,5 @@
+{
+  "notification_style": "overlay",
+  "overlay_theme": "glass",
+  "_comment": "PEON_DIR for Herdr alerts only. notify.sh accepts only its own theme names; scripts/mac-overlay-glass.js is a link to ../scripts/mac-overlay-herdr.js."
+}
