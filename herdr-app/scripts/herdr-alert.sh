@@ -32,6 +32,6 @@ fi
 # The overlay stays alive in the background for its dismiss time; with the output detached, the
 # caller (the toast mod's exec) gets the exit code at once and closes the in-app toast.
 exec env PEON_DIR="$here/../peon" PEON_NOTIF_STYLE=overlay PEON_NOTIF_POSITION=herdr \
-  PEON_NOTIFY_TYPE="$type" PEON_NOTIF_DISMISS="${HERDR_ALERT_DISMISS:-6}" PEON_NOTIF_ALL_SCREENS=false \
+  PEON_NOTIFY_TYPE="$type" PEON_NOTIF_DISMISS="${HERDR_ALERT_DISMISS:-11}" PEON_NOTIF_ALL_SCREENS=false \
   PEON_CLICK_COMMAND="$click" HERDR_ALERT_TITLE="$title" HERDR_ALERT_THEME="$theme" \
   PEON_MSG_SUBTITLE="" bash "$notify" "$body" "$title" "$color" "$icon" >/dev/null 2>&1 </dev/null
