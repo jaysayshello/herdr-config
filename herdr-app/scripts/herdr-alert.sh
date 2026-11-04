@@ -29,10 +29,14 @@ if [ -n "$action" ]; then
   [ -n "$name" ] && click="$click; herdr-app do $(printf '%q' "$name") $(printf '%q' "$args")"
 fi
 
+# alert-size: "compact" or "large", written by dotfiles/scripts/widgets.sh (laptop / desktop).
+size=$(cat "$here/../alert-size" 2>/dev/null || echo large)
+
 # The overlay stays alive in the background for its dismiss time; with the output detached, the
 # caller (the toast mod's exec) gets the exit code at once and closes the in-app toast.
 exec env PEON_DIR="$here/../peon" PEON_NOTIF_STYLE=overlay PEON_NOTIF_POSITION=herdr \
   PEON_NOTIFY_TYPE="$type" PEON_NOTIF_DISMISS="${HERDR_ALERT_DISMISS:-11}" PEON_NOTIF_ALL_SCREENS=false \
   PEON_CLICK_COMMAND="$click" HERDR_ALERT_TITLE="$title" HERDR_ALERT_THEME="$theme" \
   HERDR_WINDOW="$(jq -r '.bounds | map(tostring) | join(",")' "$here/../window.json" 2>/dev/null)" \
+  HERDR_ALERT_SIZE="$size" \
   PEON_MSG_SUBTITLE="" bash "$notify" "$body" "$title" "$color" "$icon" >/dev/null 2>&1 </dev/null

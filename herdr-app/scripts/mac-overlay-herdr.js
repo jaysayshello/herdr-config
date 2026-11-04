@@ -63,7 +63,12 @@ function run(argv) {
   // notify.sh sends the title as the message and the body as the subtitle: show each once.
   if (!title || message === title) { title = title || message; message = ''; }
 
-  var winW = 520, winH = 140, pad = 8;
+  // HERDR_ALERT_SIZE: "large" (desktop) or "compact" (laptop; fits yabai's 100 px top padding).
+  // y values are the text tops, down from the card's top edge.
+  var S = envStr('HERDR_ALERT_SIZE') === 'compact'
+    ? { w: 380, h: 88, icon: 48, iconX: 12, gap: 12, kind: [10, 22], title: [13, 42], detail: [11, 60], close: [14, 24] }
+    : { w: 520, h: 140, icon: 72, iconX: 18, gap: 18, kind: [13, 36], title: [18, 64], detail: [15, 90], close: [16, 30] };
+  var winW = S.w, winH = S.h, pad = 8;
   var cardW = winW - pad * 2, cardH = winH - pad * 2, radius = 10;
 
   $.NSApplication.sharedApplication;
@@ -128,7 +133,7 @@ function run(argv) {
   win.contentView.addSubview(card);
 
   // The space's wizard, pixels kept sharp; without one, a dot in the tone color.
-  var iconSize = 72, iconX = pad + 18, iconY = pad + (cardH - iconSize) / 2;
+  var iconSize = S.icon, iconX = pad + S.iconX, iconY = pad + (cardH - iconSize) / 2;
   var img = iconPath ? $.NSImage.alloc.initWithContentsOfFile($(iconPath)) : null;
   if (img && !img.isNil()) {
     var iv = $.NSImageView.alloc.initWithFrame($.NSMakeRect(iconX, iconY, iconSize, iconSize));
@@ -138,7 +143,7 @@ function run(argv) {
   } else {
     // On the card's layer (its coordinates): the content view's own layer is under the card.
     var dot = $.CAShapeLayer.layer;
-    dot.setPath($.CGPathCreateWithEllipseInRect($.CGRectMake(iconX - pad + 14, iconY - pad + 14, 12, 12), null));
+    dot.setPath($.CGPathCreateWithEllipseInRect($.CGRectMake(iconX - pad + iconSize / 2 - 6, iconY - pad + iconSize / 2 - 6, 12, 12), null));
     dot.setFillColor(cg(tone, 1)); card.layer.addSublayer(dot);
   }
 
@@ -150,12 +155,12 @@ function run(argv) {
     l.cell.setLineBreakMode($.NSLineBreakByTruncatingTail);
     win.contentView.addSubview(l);
   }
-  var textX = iconX + iconSize + 18, textW = pad + cardW - textX - 40;
+  var textX = iconX + iconSize + S.gap, textW = pad + cardW - textX - 40;
   var now = new Date(), ts = ('0' + now.getHours()).slice(-2) + ':' + ('0' + now.getMinutes()).slice(-2);
-  label(kind + '  ·  ' + ts, textX, pad + cardH - 36, textW, 13, $.NSFontWeightMedium, tone, 1);
-  label(title, textX, pad + cardH - 64, textW, 18, $.NSFontWeightSemibold, theme.foreground, 1);
+  label(kind + '  ·  ' + ts, textX, pad + cardH - S.kind[1], textW, S.kind[0], $.NSFontWeightMedium, tone, 1);
+  label(title, textX, pad + cardH - S.title[1], textW, S.title[0], $.NSFontWeightSemibold, theme.foreground, 1);
   var detail = [message, subtitle].filter(function (v) { return v; }).join('  ·  ');
-  if (detail) label(detail, textX, pad + cardH - 90, textW, 15, $.NSFontWeightRegular, theme.muted, 1);
+  if (detail) label(detail, textX, pad + cardH - S.detail[1], textW, S.detail[0], $.NSFontWeightRegular, theme.muted, 1);
 
   function runClick() {
     if (clickCommand) {
@@ -187,8 +192,8 @@ function run(argv) {
   hit.setTitle($('')); hit.setBordered(false); hit.setTransparent(true);
   hit.setTarget(handler); hit.setAction('open'); win.contentView.addSubview(hit);
   if (showClose) {
-    var cx = pad + cardW - 30, cy = pad + cardH - 30;
-    label('\u00D7', cx, cy, 22, 16, $.NSFontWeightRegular, theme.dim, 1);
+    var cx = pad + cardW - S.close[1], cy = pad + cardH - S.close[1];
+    label('\u00D7', cx, cy, 22, S.close[0], $.NSFontWeightRegular, theme.dim, 1);
     var xb = $.NSButton.alloc.initWithFrame($.NSMakeRect(cx - 4, cy - 4, 28, 28));
     xb.setTitle($('')); xb.setBordered(false); xb.setTransparent(true);
     xb.setTarget(handler); xb.setAction('close'); win.contentView.addSubview(xb);
