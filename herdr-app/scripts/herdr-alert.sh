@@ -34,4 +34,5 @@ fi
 exec env PEON_DIR="$here/../peon" PEON_NOTIF_STYLE=overlay PEON_NOTIF_POSITION=herdr \
   PEON_NOTIFY_TYPE="$type" PEON_NOTIF_DISMISS="${HERDR_ALERT_DISMISS:-11}" PEON_NOTIF_ALL_SCREENS=false \
   PEON_CLICK_COMMAND="$click" HERDR_ALERT_TITLE="$title" HERDR_ALERT_THEME="$theme" \
+  HERDR_WINDOW="$(jq -r '.bounds | map(tostring) | join(",")' "$here/../window.json" 2>/dev/null)" \
   PEON_MSG_SUBTITLE="" bash "$notify" "$body" "$title" "$color" "$icon" >/dev/null 2>&1 </dev/null

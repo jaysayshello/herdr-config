@@ -83,7 +83,17 @@ function run(argv) {
   var left = vf.origin.x + margin, right = vf.origin.x + vf.size.width - winW - margin, center = vf.origin.x + (vf.size.width - winW) / 2;
   var top = vf.origin.y + vf.size.height - winH - off, bottom = vf.origin.y + off;
   switch (position) {
-    case 'herdr': x = sf.origin.x + 150; y = sf.origin.y + sf.size.height - 76 - winH - slot * (winH + 4); break;
+    case 'herdr':
+      // HERDR_WINDOW: Herdr's window.json bounds "x,y,w,h" (top-left origin). The card's right edge
+      // lines up with the window's, 6 px above its top; more alerts stack upward.
+      var wb = envStr('HERDR_WINDOW').split(',').map(parseFloat);
+      if (wb.length === 4 && wb.every(function (v) { return !isNaN(v); })) {
+        x = sf.origin.x + wb[0] + wb[2] - winW + pad;
+        y = sf.origin.y + sf.size.height - wb[1] + 6 - pad + slot * (winH + 4);
+      } else {
+        x = sf.origin.x + 150; y = sf.origin.y + sf.size.height - 76 - winH - slot * (winH + 4);
+      }
+      break;
     case 'top-right': x = right; y = top; break;
     case 'top-left': x = left; y = top; break;
     case 'bottom-right': x = right; y = bottom; break;
