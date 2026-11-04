@@ -326,7 +326,10 @@ export default class Spaces extends View {
       .role("button")
       .accessibility_label(w.name)
       .when(on, (el) => el.bg(t.selected))
-      .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      // Hover: brighter than the selected row (theme hover is the same color as selected here),
+      // with an accent edge. Every row keeps a 1px border, so the edge moves nothing.
+      .border(1).border_color("#00000000")
+      .when(!on, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.accent)))
       .when(this.pressed === i && this.over !== i, (el) => el.opacity(0.5))
       .when(this.pressed !== null && this.over === i && this.pressed !== i, (el) => el.child(
         div().absolute().left(0).right(0).h(2).bg(t.accent)

@@ -264,8 +264,10 @@ export default class PullRequests extends View {
       .gap(8)
       .role("button").accessibility_label(`${p.repo} #${p.number} ${p.title}`)
       .tooltip(tip)
-      .when(on, (el) => el.bg(t.selected).border(1).border_color(t.accent))
-      .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      // Hover: as the Spaces rows (t3-spaces). The keyboard row keeps its full accent border.
+      .border(1).border_color("#00000000")
+      .when(on, (el) => el.bg(t.selected).border_color(t.accent))
+      .when(!on, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.accent)))
       .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
