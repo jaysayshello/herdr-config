@@ -7,15 +7,19 @@
 // Approval: a green check after the number when the code owners of every changed file approved
 // (owners.js, against the base branch's CODEOWNERS and team members) and GitHub's review decision
 // agrees; amber when someone approved but that isn't enough yet. The tooltip says who or what.
+// Comments: a speech bubble with the count of comments people (not bots) left (comments.js).
+// Blue when some came after your last comment and after you last opened the PR from this list;
+// dim when you saw them all. Opening the PR (click or Enter) marks them seen.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, theme, props, run, spaces, focused, nextCommand, notify, openOverlay, closeOverlay } from "herdr";
 import { checkCodeOwners } from "./owners.js";
+import { fetchComments, summarize } from "./comments.js";
 
 const EVERY = 5000;
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title isDraft url headRefOid baseRefName reviewDecision author { login } repository { name nameWithOwner }
+  nodes { number title isDraft url headRefOid baseRefName reviewDecision updatedAt author { login } repository { name nameWithOwner }
     latestReviews(first: 20) { nodes { state author { login } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }`;
 
@@ -42,6 +46,9 @@ export default class PullRequests extends View {
     this.folded = JSON.parse(localStorage.getItem("folded") ?? "{}");
     // url -> { key, result } of the last code owner check (see checkApprovals).
     this.approvals = new Map();
+    // url -> { key, list } of people's comments (see checkComments); url -> ISO time of the last open.
+    this.comments = new Map();
+    this.seen = JSON.parse(localStorage.getItem("seen") ?? "{}");
     // The keyboard row: a pull request's url, while this list holds the keyboard; `back` is the
     // pane that had it before.
     this.handle = cx.focus_handle();
@@ -138,6 +145,7 @@ export default class PullRequests extends View {
         fullRepo: p.repository.nameWithOwner,
         base: p.baseRefName,
         head: p.headRefOid,
+        updated: p.updatedAt,
         author: p.author?.login ?? "",
         decision: p.reviewDecision,
         reviews: p.latestReviews.nodes.filter((v) => v.author).map((v) => ({ login: v.author.login, state: v.state })),
@@ -155,6 +163,39 @@ export default class PullRequests extends View {
       cx.notify();
     }
     if (!this.error) await this.checkApprovals(cx);
+    if (!this.error) await this.checkComments(cx);
+  }
+
+  // Reads a pull request's comments again only when GitHub's updatedAt for it changed.
+  async checkComments(cx) {
+    let changed = false;
+    for (const p of this.prs ?? []) {
+      if (this.comments.get(p.url)?.key === p.updated) continue;
+      try {
+        this.comments.set(p.url, { key: p.updated, list: await fetchComments(gql, p.fullRepo, p.number, p.author) });
+        changed = true;
+      } catch (e) {
+        // Keep the last list; the next change of updatedAt tries again.
+      }
+    }
+    if (changed) cx.notify();
+  }
+
+  // Opening a pull request from this list marks its comments seen.
+  open(url) {
+    this.seen[url] = new Date().toISOString();
+    localStorage.setItem("seen", JSON.stringify(this.seen));
+    exec("open", [url]).catch(() => null);
+  }
+
+  // { count, fresh, text } of people's comments, or null when there are none.
+  talk(p) {
+    const list = this.comments.get(p.url)?.list;
+    if (!list) return null;
+    const s = summarize(list, this.seen[p.url]);
+    if (!s.count) return null;
+    const who = s.by.map(([login, n]) => `${login} (${n})`).join(", ");
+    return { ...s, text: `Comments: ${who}${s.fresh ? `; ${s.fresh} new` : ""}` };
   }
 
   // Runs the code owner check for each pull request with an approval, again only when its head
@@ -210,6 +251,8 @@ export default class PullRequests extends View {
   row(t, p) {
     const on = this.active() && this.cursor === p.url;
     const review = this.approval(p);
+    const talk = this.talk(p);
+    const tip = [`${p.repo} #${p.number}: ${p.title}`, review?.text, talk?.text].filter(Boolean).join("\n");
     return h_flex()
       .id(`pr-${p.repo}-${p.number}`)
       .w_full().min_w(0)
@@ -220,10 +263,10 @@ export default class PullRequests extends View {
       .items_center()
       .gap(8)
       .role("button").accessibility_label(`${p.repo} #${p.number} ${p.title}`)
-      .tooltip(`${p.repo} #${p.number}: ${p.title}${review ? `\n${review.text}` : ""}`)
+      .tooltip(tip)
       .when(on, (el) => el.bg(t.selected).border(1).border_color(t.accent))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
-      .on_click(() => exec("open", [p.url]).catch(() => null))
+      .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
         openOverlay({ mod: "t3-prs", kind: "popup", width: 220, height: 90, props: { menu: p } });
@@ -234,6 +277,10 @@ export default class PullRequests extends View {
       // not yet: a yellow clock.
       .when(Boolean(review), (el) => el.child(svg(`mods/workspace-chrome/${review.state === "approved" ? "circle-check" : "clock"}.svg`)
         .size(13).flex_none().text_color(review.state === "approved" ? t.ansi2 : t.ansi3).accessibility_label(review.text)))
+      .when(Boolean(talk), (el) => el.child(h_flex().flex_none().gap(2).items_center()
+        .text_size(11).text_color(talk.fresh ? t.accent : t.dim).accessibility_label(talk.text)
+        .child(svg("mods/t3-prs/message.svg").size(12).flex_none())
+        .child(div().child(String(talk.fresh || talk.count)))))
       .child(div().min_w(0).truncate().text_color(t.foreground).child(p.title))
       .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(p.repo));
   }
@@ -304,7 +351,7 @@ export default class PullRequests extends View {
       .track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (!this.active()) return;
-        if (e.key === "enter") exec("open", [this.cursor]).catch(() => null);
+        if (e.key === "enter") this.open(this.cursor);
         else if (e.key === "escape") this.leave();
         else if (e.key === "down") this.down();
         else if (e.key === "up") this.up();
