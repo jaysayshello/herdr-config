@@ -4,15 +4,29 @@
 // takes the keyboard into this list, `t3-prs.up` from its first row gives it back to the pane.
 // In the list: Enter opens, Esc leaves. Right-click a row: copy it for Slack (the `slackpr` zsh
 // function), or close it (asks first; the confirm dialog sends `t3-prs.close`).
+// Approval: a green check after the number when the code owners of every changed file approved
+// (owners.js, against the base branch's CODEOWNERS and team members) and GitHub's review decision
+// agrees; amber when someone approved but that isn't enough yet. The tooltip says who or what.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, theme, props, run, spaces, focused, nextCommand, notify, openOverlay, closeOverlay } from "herdr";
+import { checkCodeOwners } from "./owners.js";
 
 const EVERY = 5000;
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title isDraft url repository { name }
+  nodes { number title isDraft url headRefOid baseRefName reviewDecision author { login } repository { name nameWithOwner }
+    latestReviews(first: 20) { nodes { state author { login } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }`;
+
+// GitHub GraphQL through gh: `data`, or an error with gh's message.
+async function gql(query, vars = {}) {
+  const args = ["api", "graphql", "-f", `query=${query}`];
+  for (const [k, v] of Object.entries(vars)) if (v != null) args.push(typeof v === "number" ? "-F" : "-f", `${k}=${v}`);
+  const r = await exec("gh", args);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh exited with ${r.code}`);
+  return JSON.parse(r.stdout).data;
+}
 
 // statusCheckRollup.state: SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, or none (no checks).
 const CI = { SUCCESS: "passed", FAILURE: "failed", ERROR: "failed", PENDING: "running", EXPECTED: "running" };
@@ -26,6 +40,8 @@ export default class PullRequests extends View {
     this.loading = false;
     this.manual = false;
     this.folded = JSON.parse(localStorage.getItem("folded") ?? "{}");
+    // url -> { key, result } of the last code owner check (see checkApprovals).
+    this.approvals = new Map();
     // The keyboard row: a pull request's url, while this list holds the keyboard; `back` is the
     // pane that had it before.
     this.handle = cx.focus_handle();
@@ -119,6 +135,12 @@ export default class PullRequests extends View {
         draft: p.isDraft,
         url: p.url,
         repo: p.repository.name,
+        fullRepo: p.repository.nameWithOwner,
+        base: p.baseRefName,
+        head: p.headRefOid,
+        author: p.author?.login ?? "",
+        decision: p.reviewDecision,
+        reviews: p.latestReviews.nodes.filter((v) => v.author).map((v) => ({ login: v.author.login, state: v.state })),
         ci: CI[p.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? null,
       }));
       this.error = null;
@@ -132,6 +154,46 @@ export default class PullRequests extends View {
       this.manual = false;
       cx.notify();
     }
+    if (!this.error) await this.checkApprovals(cx);
+  }
+
+  // Runs the code owner check for each pull request with an approval, again only when its head
+  // commit, base, reviews or review decision changed (owners.js keeps team members 30 minutes).
+  async checkApprovals(cx) {
+    let changed = false;
+    for (const p of this.prs ?? []) {
+      const approvers = (p.reviews ?? []).filter((v) => v.state === "APPROVED" && v.login !== p.author);
+      if (!approvers.length) continue;
+      const key = JSON.stringify([p.head, p.base, p.decision, p.reviews]);
+      if (this.approvals.get(p.url)?.key === key) continue;
+      let result;
+      try {
+        result = await checkCodeOwners(gql, { repo: p.fullRepo, number: p.number, base: p.base, author: p.author, reviews: p.reviews });
+      } catch (e) {
+        result = { error: String(e.message ?? e) };
+      }
+      this.approvals.set(p.url, { key, result });
+      changed = true;
+    }
+    if (changed) cx.notify();
+  }
+
+  // "approved", "partial" or null, with the words for the tooltip.
+  approval(p) {
+    const approvers = (p.reviews ?? []).filter((v) => v.state === "APPROVED" && v.login !== p.author).map((v) => v.login);
+    if (!approvers.length) return null;
+    const blockers = (p.reviews ?? []).filter((v) => v.state === "CHANGES_REQUESTED").map((v) => v.login);
+    if (blockers.length) return { state: "partial", text: `Changes requested by ${blockers.join(", ")}` };
+    const r = this.approvals.get(p.url)?.result;
+    if (!r) return null;
+    if (r.error) return { state: "partial", text: `Approved by ${approvers.join(", ")}; can't check code owners: ${r.error}` };
+    if (!r.ok) {
+      const wait = r.missing.map((s) => s.owners.join(" or ")).join("; ");
+      return { state: "partial", text: `Approved by ${approvers.join(", ")}; waiting for ${wait}` };
+    }
+    if (p.decision === "REVIEW_REQUIRED" || p.decision === "CHANGES_REQUESTED")
+      return { state: "partial", text: `Code owners approved (${approvers.join(", ")}); GitHub still needs more reviews` };
+    return { state: "approved", text: `Approved by code owners: ${approvers.join(", ")}` };
   }
 
   mark(t, ci) {
@@ -147,6 +209,7 @@ export default class PullRequests extends View {
 
   row(t, p) {
     const on = this.active() && this.cursor === p.url;
+    const review = this.approval(p);
     return h_flex()
       .id(`pr-${p.repo}-${p.number}`)
       .w_full().min_w(0)
@@ -157,7 +220,7 @@ export default class PullRequests extends View {
       .items_center()
       .gap(8)
       .role("button").accessibility_label(`${p.repo} #${p.number} ${p.title}`)
-      .tooltip(`${p.repo} #${p.number}: ${p.title}`)
+      .tooltip(`${p.repo} #${p.number}: ${p.title}${review ? `\n${review.text}` : ""}`)
       .when(on, (el) => el.bg(t.selected).border(1).border_color(t.accent))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
       .on_click(() => exec("open", [p.url]).catch(() => null))
@@ -167,6 +230,10 @@ export default class PullRequests extends View {
       })
       .child(this.mark(t, p.ci))
       .child(div().flex_none().text_color(t.dim).child(`#${p.number}`))
+      // Shape tells them apart: the theme's green and yellow are close. Approved: a green check;
+      // not yet: a yellow clock.
+      .when(Boolean(review), (el) => el.child(svg(`mods/workspace-chrome/${review.state === "approved" ? "circle-check" : "clock"}.svg`)
+        .size(13).flex_none().text_color(review.state === "approved" ? t.ansi2 : t.ansi3).accessibility_label(review.text)))
       .child(div().min_w(0).truncate().text_color(t.foreground).child(p.title))
       .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(p.repo));
   }
