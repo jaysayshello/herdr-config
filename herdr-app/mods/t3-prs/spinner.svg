@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2">
+  <circle cx="12" cy="12" r="9.4" stroke-opacity="0.14"/>
+  <path d="M12.00 21.40A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M9.97 21.18A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M8.03 20.52A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M6.28 19.46A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M4.80 18.04A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M3.66 16.34A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M2.92 14.43A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M2.61 12.41A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M2.74 10.37A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M3.32 8.40A9.4 9.4 0 1 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M4.30 6.61A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M5.65 5.07A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M7.30 3.86A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M9.17 3.04A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M11.18 2.64A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M13.23 2.68A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M15.21 3.17A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M17.05 4.07A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M18.65 5.35A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M19.93 6.95A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M20.83 8.79A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M21.32 10.77A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M21.36 12.82A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <path d="M20.96 14.83A9.4 9.4 0 0 1 20.14 16.70" stroke-opacity="0.08"/>
+  <circle cx="20.14" cy="16.70" r="1.6" fill="currentColor" stroke="none"/>
+</svg>
