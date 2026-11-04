@@ -264,17 +264,17 @@ export default class PullRequests extends View {
       .gap(8)
       .role("button").accessibility_label(`${p.repo} #${p.number} ${p.title}`)
       .tooltip(tip)
-      // Hover: as the Spaces rows (t3-spaces). The keyboard row keeps its full accent border.
+      // Selected (the keyboard row) and hover: as the Spaces rows (t3-spaces).
       .border(1).border_color("#00000000")
-      .when(on, (el) => el.bg(t.selected).border_color(t.accent))
-      .when(!on, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.accent)))
+      .when(on, (el) => el.bg(t.accent + "8c").border_color(t.accent))
+      .when(!on, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.foreground + "59")))
       .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
         openOverlay({ mod: "t3-prs", kind: "popup", width: 220, height: 90, props: { menu: p } });
       })
       .child(this.mark(t, p.ci))
-      .child(div().flex_none().text_color(t.dim).child(`#${p.number}`))
+      .child(div().flex_none().text_color(on ? t.muted : t.dim).child(`#${p.number}`))
       // Shape tells them apart: the theme's green and yellow are close. Approved: a green check;
       // not yet: a yellow clock.
       .when(Boolean(review), (el) => el.child(svg(`mods/workspace-chrome/${review.state === "approved" ? "circle-check" : "clock"}.svg`)
