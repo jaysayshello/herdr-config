@@ -110,6 +110,8 @@
     "cmd-shift-h": "t3-chrome.bars",
     "ctrl-w": "tmux-keys.nav-up",
     "ctrl-s": "tmux-keys.nav-down",
-    "ctrl-f": "tmux-keys.orchestrator"
+    "ctrl-f": "tmux-keys.orchestrator",
+    "ctrl-space p": "tmux-keys.pin",
+    "ctrl-space o": "tmux-keys.section:Operational"
   }
 }

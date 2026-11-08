@@ -8,8 +8,8 @@ cd "$(dirname "$0")"
 
 # Only what I made. Herdr's shipped mods/layouts/themes, run-time state (shared.json, view.json,
 # window.json, data/, sockets, logs) and generated files (*.d.ts, jsconfig.json) stay out.
-APP_MODS="t3-agents t3-chrome t3-inbox t3-new-menu t3-pane t3-prs t3-spaces t3-tabs tmux-keys"
-APP_FILES="keys.json settings.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts peon"
+APP_MODS="t3-agents t3-chrome t3-inbox t3-menu t3-new-menu t3-pane t3-prs t3-spaces t3-tabs tmux-keys"
+APP_FILES="keys.json settings.json spaces.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts peon"
 TUI_FILES="config.toml scripts"
 EXCLUDE="--exclude=*.d.ts --exclude=jsconfig.json --exclude=.DS_Store --exclude=*.bak*"
 

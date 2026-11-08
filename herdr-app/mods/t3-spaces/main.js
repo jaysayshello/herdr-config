@@ -1,7 +1,9 @@
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
 // grouped by machine when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
-// switch, right-click for its menu, drag to reorder.
+// switch, right-click for its menu (t3-menu), drag to reorder. Sidebar sections ("Operational") show
+// below Spaces; a pinned space shows a pin and keeps its place in its list: it does not drag, and
+// no drag in its list crosses it. Both go by space name ("space.sidebar", from spaces.json via tmux-keys).
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -40,6 +42,9 @@ function select(s) {
   }
   run("space.select", { id: s.id });
 }
+const sidebar = () => shared("space.sidebar") ?? {};
+const pinned = (name) => (sidebar().pinned ?? []).includes(name);
+const sectionOf = (name) => Object.entries(sidebar().sections ?? {}).find(([, names]) => names.includes(name))?.[0] ?? null;
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -202,7 +207,18 @@ export default class Spaces extends View {
 
   menu(w) {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "t3-menu", kind: "popup", width: 250, height: 300, props: { tab: "space", target: { id: w.id } } });
+  }
+
+  // A drop of space `from` on row `to` moves every space of that list between them: refused across
+  // machines or sections, and when a pinned space is among them.
+  movable(from, to) {
+    const sp = spaces(), a = sp[from], b = sp[to];
+    if (!a || !b || from === to) return false;
+    const group = (s) => JSON.stringify([s.machine ?? null, sectionOf(s.name)]);
+    if (group(a) !== group(b)) return false;
+    const [lo, hi] = from < to ? [from, to] : [to, from];
+    return !sp.slice(lo, hi + 1).some((s) => group(s) === group(a) && pinned(s.name));
   }
 
   // Spaces in order, each worktree space moved under its main checkout's.
@@ -235,9 +251,22 @@ export default class Spaces extends View {
     cx.notify();
   }
 
-  // The rows, under a header per machine once one isn't this computer.
-  grouped(t) {
-    const rows = this.ordered();
+  // Each sidebar section that has a space, after the Spaces rows: its heading (drawn as the Spaces
+  // one, at the same inset inside the list's padding), then its rows.
+  sections(rows, t) {
+    return Object.keys(sidebar().sections ?? {}).flatMap((name) => {
+      const mine = rows.filter((r) => sectionOf(r.w.name) === name);
+      if (!mine.length) return [];
+      return [
+        h_flex().id(`section-${name}`).h(32).mt(8).flex_none().pl(8).items_center().text_size(12).font_medium().text_color(t.muted).child(name),
+        ...mine.map((r) => this.row(r, t)),
+      ];
+    });
+  }
+
+  // The rows not in a section, under a header per machine once one isn't this computer.
+  grouped(t, all) {
+    const rows = all.filter((r) => !sectionOf(r.w.name));
     const draw = (r) => this.row(r, t);
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name)])].sort();
     const loading = m => {
@@ -341,9 +370,11 @@ export default class Spaces extends View {
         this.over = i;
       })
       .on_mouse_move((_e, cx) => {
-        const source = spaces()[this.pressed];
-        const over = source && (source.machine ?? null) === (w.machine ?? null) ? i : null;
-        if (this.pressed !== null && this.over !== over) {
+        if (this.pressed === null) return;
+        // A pinned space does not drag: it stays as pressed, and no row offers a drop.
+        const stuck = this.pressed === i || pinned(spaces()[this.pressed]?.name);
+        const over = stuck ? this.pressed : this.movable(this.pressed, i) ? i : null;
+        if (this.over !== over) {
           this.over = over;
           cx.notify();
         }
@@ -380,6 +411,7 @@ export default class Spaces extends View {
           // A done space's name glows with its frame: green, the same pulse (from a brighter low, so it stays readable).
           .child(div().min_w(0).text_color(done ? t.ansi2 : t.foreground).child(w.name)
             .when(done, el => el.loop("opacity", { from: 0.55, to: 1, period: 1600 })))
+          .when(pinned(w.name), el => el.child(svg("mods/workspace-chrome/pin.svg").size(12).flex_none().text_color(t.dim)))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
           .when(working, el => el.child(h_flex().size(18).flex_none().items_center().justify_center()
             .role("status").accessibility_label("Agent working")
@@ -429,6 +461,7 @@ export default class Spaces extends View {
     if (fresh) setShared("space.wizards", wizards);
     // The creatures these replaced; their numbers mean nothing now.
     if (shared("space.icons") != null) setShared("space.icons", null);
+    const rows = this.ordered();
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().id("spaces-heading").h(32).flex_none().pl(16).pr(10).items_center().justify_between().text_size(12).font_medium().text_color(t.dim)
         .child(div().text_color(t.muted).child("Spaces"))
@@ -437,6 +470,6 @@ export default class Spaces extends View {
       .child(v_flex().id("space-list").flex_1().min_h(0).overflow_y_scroll()
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .child(v_flex().id("space-content").w_full().flex_none().px(8).pb(8)
-          .children(this.grouped(t))));
+          .children([...this.grouped(t, rows), ...this.sections(rows, t)])));
   }
 }
