@@ -1,11 +1,11 @@
 {
   "pinned": [
-    "cloudflare-2026-11-08",
+    "cloudflare",
     "orchestrator"
   ],
   "sections": {
     "Operational": [
-      "cloudflare-2026-11-08"
+      "cloudflare"
     ]
   }
 }
