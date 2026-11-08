@@ -47,6 +47,32 @@ const pinned = (name) => (sidebar().pinned ?? []).includes(name);
 const sectionOf = (name) => Object.entries(sidebar().sections ?? {}).find(([, names]) => names.includes(name))?.[0] ?? null;
 // The look of every list heading here (Spaces and each sidebar section), so a new section matches.
 const heading = (id, label, t) => h_flex().id(id).h(32).flex_none().items_center().text_size(12).font_medium().text_color(t.muted).child(div().flex_1().child(label));
+// The orchestrator's row has a frame that never stops: a mauve comet (Catppuccin Mocha, the
+// palette of the #1e1e2e background) runs around a faint mauve edge, outside the row, so the
+// selection fill and the green done glow inside stay as they are. A native spin: no timer, no render.
+const ORCHESTRATOR = "orchestrator";
+const COMET = "#cba6f7";
+// The comet is a turning wedge (sweep.svg) seen only through four 2px strips, one per edge: a spun
+// svg paints over later siblings, so a cover can't hide its middle, but a clip holds. Each strip holds
+// a frame-sized box, so every wedge turns about the same center. The frame's width comes from the
+// sidebar's (the list's 8px sides off); its height assumes the one-line row (30px).
+const EDGE = 2, GAP = 4, ROW_H = 30;
+const orbit = (row, width) => {
+  const w = width - 16 + 2 * GAP, h = ROW_H + 2 * GAP;
+  const strip = (side) => {
+    const across = side === "top" || side === "bottom";
+    const clip = div().absolute().overflow_hidden()[side](-GAP)
+      .when(across, (el) => el.left(-GAP).right(-GAP).h(EDGE))
+      .when(!across, (el) => el.top(-GAP).bottom(-GAP).w(EDGE));
+    const box = h_flex().absolute().w(w).h(h).items_center().justify_center()[side](0)[across ? "left" : "top"](0)
+      .child(svg("mods/t3-spaces/sweep.svg").size(360).flex_none().text_color(COMET).spin(3200));
+    return clip.child(box);
+  };
+  return div().relative().flex_none().my(GAP + 3)
+    .child(div().absolute().inset(-GAP).rounded(10).border(EDGE).border_color(COMET + "33"))
+    .children(["top", "right", "bottom", "left"].map(strip))
+    .child(row);
+};
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -344,7 +370,7 @@ export default class Spaces extends View {
     // and a space with a finished agent you have not looked at yet glows.
     const working = agents().some((a) => a.space === w.id && a.status === "working");
     const done = agents().some((a) => a.space === w.id && a.status === "done");
-    return v_flex()
+    const el = v_flex()
       .relative()
       .id(`space-${w.id}`)
       .px(8)
@@ -432,6 +458,7 @@ export default class Spaces extends View {
             .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(lit))
             .when(folded, el => el.child(String(kids))))),
       );
+    return w.name === ORCHESTRATOR ? orbit(el, find(layout(), "sidebar")?.size?.px ?? 256) : el;
   }
 
   render() {
