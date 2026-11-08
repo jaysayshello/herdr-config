@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { appHome, exec, focused, hc, home, layout, nextCommand, notify, run, terminals } from "herdr";
+import { appHome, exec, focused, hc, home, layout, nextCommand, notify, run, spaces, terminals } from "herdr";
 
 // The keys from ~/.config/herdr/config.toml that need more than one command (keys.json,
 // section layout:herdr-t3). Nothing to see: the layout keeps a 0px copy alive for the keys.
@@ -8,11 +8,13 @@ import { appHome, exec, focused, hc, home, layout, nextCommand, notify, run, ter
 //   new-space                Ctrl+n: a new space in ~/Projects (keys.json can't pass `folder`)
 //   nav-up|nav-down          Ctrl+w/s: the previous/next space; past the last space, down into the
 //                            Pull requests list (t3-prs), but only while that list shows
+//   orchestrator             Ctrl+f: the space named "orchestrator" (by name: ids change after a restart)
 // It also puts scripts/toast-external.js over the shipped toast mod at each start, so
 // notifications show outside the app (Herdr restores shipped mods at start and keeps the edit
 // as mods/toast-edited*, which this removes).
 
 const VIM = /^g?(view|n?vim?x?)(diff)?$/i;
+const ORCHESTRATOR = "orchestrator";
 const KEY = { left: "ctrl+h", down: "ctrl+j", up: "ctrl+k", right: "ctrl+l" };
 
 const fail = (title, r) => notify({ title, body: (r.stderr || r.stdout).trim(), level: "error" });
@@ -52,6 +54,12 @@ async function balance() {
   if (r.code !== 0) fail("Could not balance panes", r);
 }
 
+function orchestrator() {
+  const space = spaces().find((s) => s.name === ORCHESTRATOR);
+  if (space) run("space.select", { id: space.id });
+  else notify({ title: "No orchestrator space", body: `Name a space "${ORCHESTRATOR}" (shift-f2).`, level: "error" });
+}
+
 export default class TmuxKeys extends View {
   init(_props, cx) {
     exec("/bin/sh", ["-c", 'cd "$1" && { cmp -s scripts/toast-external.js mods/toast/main.js || cp scripts/toast-external.js mods/toast/main.js; } && rm -rf mods/toast-edited*', "sh", appHome()])
@@ -65,6 +73,7 @@ export default class TmuxKeys extends View {
           else if (c === "new-space") run("space.new", { folder: `${home()}/Projects` });
           else if (c === "nav-down") run(prsShown() ? "t3-prs.down" : "space.next");
           else if (c === "nav-up") run(prsShown() ? "t3-prs.up" : "space.prev");
+          else if (c === "orchestrator") orchestrator();
         } catch (e) {
           notify({ title: `tmux-keys: ${c}`, body: String(e), level: "error" });
         }

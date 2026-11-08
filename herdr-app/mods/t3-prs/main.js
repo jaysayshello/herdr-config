@@ -7,6 +7,8 @@
 // Approval: a green check after the number when the code owners of every changed file approved
 // (owners.js, against the base branch's CODEOWNERS and team members) and GitHub's review decision
 // agrees; amber when someone approved but that isn't enough yet. The tooltip says who or what.
+// Ready to merge (not a draft, approved, checks passed or none): the row has a steady green frame.
+// It does not pulse, so it does not look like a space with a finished agent.
 // Comments: a speech bubble with the count of comments people (not bots) left (comments.js).
 // Blue when some came after your last comment and after you last opened the PR from this list;
 // dim when you saw them all. Opening the PR (click or Enter) marks them seen.
@@ -34,6 +36,8 @@ async function gql(query, vars = {}) {
 
 // statusCheckRollup.state: SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, or none (no checks).
 const CI = { SUCCESS: "passed", FAILURE: "failed", ERROR: "failed", PENDING: "running", EXPECTED: "running" };
+// The frame of a pull request that is ready to merge.
+const READY = "#4ade80";
 
 export default class PullRequests extends View {
   init(_props, cx) {
@@ -251,9 +255,11 @@ export default class PullRequests extends View {
   row(t, p) {
     const on = this.active() && this.cursor === p.url;
     const review = this.approval(p);
+    const ready = !p.draft && review?.state === "approved" && (p.ci === "passed" || p.ci == null);
     const talk = this.talk(p);
-    const tip = [`${p.repo} #${p.number}: ${p.title}`, review?.text, talk?.text].filter(Boolean).join("\n");
+    const tip = [`${p.repo} #${p.number}: ${p.title}`, ready ? "Ready to merge" : null, review?.text, talk?.text].filter(Boolean).join("\n");
     return h_flex()
+      .relative()
       .id(`pr-${p.repo}-${p.number}`)
       .w_full().min_w(0)
       .px(8)
@@ -266,8 +272,13 @@ export default class PullRequests extends View {
       .tooltip(tip)
       // Selected (the keyboard row) and hover: as the Spaces rows (t3-spaces).
       .border(1).border_color("#00000000")
+      // Bright green, with a soft ring outside the edge for the glow. Not the theme's ansi2: it is a
+      // dull yellow-green. The keyboard row keeps its accent.
+      .when(ready && !on, (el) => el.my(4).bg(READY + "33").border_color(READY)
+        .child(div().absolute().inset(-3).rounded(11).border(2).border_color(READY + "59")))
       .when(on, (el) => el.bg(t.accent + "8c").border_color(t.accent))
-      .when(!on, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.foreground + "59")))
+      .when(!on && !ready, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.foreground + "59")))
+      .when(!on && ready, (el) => el.hover((s) => s.bg(READY + "4d")))
       .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
