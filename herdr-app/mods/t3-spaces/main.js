@@ -45,6 +45,8 @@ function select(s) {
 const sidebar = () => shared("space.sidebar") ?? {};
 const pinned = (name) => (sidebar().pinned ?? []).includes(name);
 const sectionOf = (name) => Object.entries(sidebar().sections ?? {}).find(([, names]) => names.includes(name))?.[0] ?? null;
+// The look of every list heading here (Spaces and each sidebar section), so a new section matches.
+const heading = (id, label, t) => h_flex().id(id).h(32).flex_none().items_center().text_size(12).font_medium().text_color(t.muted).child(div().flex_1().child(label));
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -258,7 +260,7 @@ export default class Spaces extends View {
       const mine = rows.filter((r) => sectionOf(r.w.name) === name);
       if (!mine.length) return [];
       return [
-        h_flex().id(`section-${name}`).h(32).mt(8).flex_none().pl(8).items_center().text_size(12).font_medium().text_color(t.muted).child(name),
+        heading(`section-${name}`, name, t).mt(8).pl(8),
         ...mine.map((r) => this.row(r, t)),
       ];
     });
@@ -463,9 +465,8 @@ export default class Spaces extends View {
     if (shared("space.icons") != null) setShared("space.icons", null);
     const rows = this.ordered();
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(h_flex().id("spaces-heading").h(32).flex_none().pl(16).pr(10).items_center().justify_between().text_size(12).font_medium().text_color(t.dim)
-        .child(div().text_color(t.muted).child("Spaces"))
-        .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))
+      .child(heading("spaces-heading", "Spaces", t).pl(16).pr(10)
+        .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().id("space-list").flex_1().min_h(0).overflow_y_scroll()
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
