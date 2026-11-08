@@ -1,11 +1,13 @@
 {
   "pinned": [
     "cloudflare",
-    "orchestrator"
+    "orchestrator",
+    "wiz"
   ],
   "sections": {
     "Operational": [
-      "cloudflare"
+      "cloudflare",
+      "wiz"
     ]
   }
 }
