@@ -48,16 +48,17 @@ const sectionOf = (name) => Object.entries(sidebar().sections ?? {}).find(([, na
 // The look of every list heading here (Spaces and each sidebar section), so a new section matches.
 const heading = (id, label, t) => h_flex().id(id).h(32).flex_none().items_center().text_size(12).font_medium().text_color(t.muted).child(div().flex_1().child(label));
 // The orchestrator's row has a frame that never stops: a 1px mauve edge (Catppuccin Mocha, the
-// palette of the #1e1e2e background), 4px outside the row so the selection fill and the green done
+// palette of the #1e1e2e background), 2px outside the row so the selection fill and the green done
 // glow inside stay as they are, fading slowly between dim and less dim. A native opacity loop: no
 // timer, no render. A comet around the row can't move evenly: spin() turns about the center of a
 // wide, short box, so it crawls along the long edges and jumps at the corners.
 const ORCHESTRATOR = "orchestrator";
 const MAUVE = "#cba6f7";
-const GAP = 4;
-const halo = (row) => div().relative().flex_none().my(GAP + 3)
-  .child(div().absolute().inset(-GAP).rounded(10).border(1).border_color(MAUVE)
-    .loop("opacity", { from: 0.15, to: 0.5, period: 4000 }))
+// The margin only makes room for the line, so the row is 2 * GAP taller than the others.
+const GAP = 2;
+const halo = (row) => div().relative().flex_none().my(GAP)
+  .child(div().absolute().inset(-GAP).rounded(8 + GAP).border(1).border_color(MAUVE)
+    .loop("opacity", { from: 0.25, to: 0.65, period: 4000 }))
   .child(row);
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
