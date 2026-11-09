@@ -16,8 +16,8 @@ MODS=$(for m in t3-agents t3-chrome t3-inbox t3-menu t3-new-menu t3-pane t3-prs 
 ORCHESTRATOR="$HOME/Projects/herdr-orchestrator-2026-11-08/.omp"
 EXCLUDE="--exclude=*.d.ts --exclude=jsconfig.json --exclude=.DS_Store --exclude=*.bak*"
 WSL=$(grep -qi microsoft /proc/version 2>/dev/null && echo 1 || true)
-# Files on the Windows drive all read as mode 777: don't carry that into the repo.
-PERMS=${WSL:+--no-perms}
+# Files on the Windows drive all read as mode 777: give everything plain modes instead.
+PERMS=${WSL:+--chmod=D755,F644}
 RESTORE=$([ "${1:-}" = "--restore" ] && echo 1 || true)
 
 copy() { # copy <from-dir> <to-dir> <paths...>
