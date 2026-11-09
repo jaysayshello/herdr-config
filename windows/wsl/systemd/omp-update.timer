@@ -1,0 +1,10 @@
+# At login (boot, with linger) and every hour, like the macOS LaunchAgent.
+[Unit]
+Description=omp update at login and every hour
+
+[Timer]
+OnStartupSec=1min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

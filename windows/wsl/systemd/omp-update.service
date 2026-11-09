@@ -1,0 +1,8 @@
+# Port of com.jay.omp-update.plist (herdr-config): runs `omp update`, one log line per run.
+[Unit]
+Description=omp update
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/bin:/bin
+ExecStart=/bin/sh -c "echo \"$(date \"+%%F %%T\") $(omp update 2>&1 | tr \"\\n\" \" \")\" >> %h/.local/state/omp-update.log"

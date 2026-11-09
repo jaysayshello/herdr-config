@@ -16,6 +16,7 @@ interface LsSpace {
 	id: string;
 	name: string;
 	folder?: string;
+	machine?: string | null;
 	active?: boolean;
 	tabs: LsTab[];
 }
@@ -27,6 +28,7 @@ interface HcGet {
 	foreground?: { cwd?: string; name?: string } | null;
 	cwd?: string;
 	state?: string;
+	labels?: Record<string, string>;
 }
 interface HcSend {
 	started?: boolean;
@@ -78,6 +80,23 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 	const ls = (signal?: AbortSignal) => runJson<{ spaces: LsSpace[] }>("herdr-app", ["ls"], signal);
 	const get = (terminal: string, signal?: AbortSignal) => runJson<HcGet>("hc", ["get", terminal, "--json"], signal);
 
+	// herdr-app ls names a remote machine's ids `<machine>/<id>` (the Windows app with omp in WSL:
+	// `wsl/t8`), but hc talks only to the core it runs on, which knows them as `t8`. Find the
+	// orchestrator's own space by the space label hc sets (terminal ids repeat across machines),
+	// keep that machine's spaces, and give everything to the model in hc's addresses.
+	async function view(signal?: AbortSignal) {
+		const [{ spaces }, me] = await Promise.all([ls(signal), self ? get(self, signal).catch(() => undefined) : undefined]);
+		const prefix = (s: LsSpace) => (s.machine ? `${s.machine}/` : "");
+		const sid = me?.labels?.["herdr.space"];
+		const selfSpace = spaces.find(s =>
+			sid ? s.id === prefix(s) + sid : s.tabs.some(t => t.terminals.some(term => term.terminal === prefix(s) + self)),
+		);
+		const machine = selfSpace?.machine ?? null;
+		const local = spaces.filter(s => (s.machine ?? null) === machine);
+		const hcId = (id: string) => (machine && id.startsWith(`${machine}/`) ? id.slice(machine.length + 1) : id);
+		return { spaces: local, selfSpace, machine, hcId };
+	}
+
 	// hc send reports started:true with status idle even when omp has not taken the prompt yet,
 	// so only a state change or a new turn proves delivery.
 	async function deliver(terminal: string, text: string, before: HcGet, signal?: AbortSignal) {
@@ -107,8 +126,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			loadMode: "essential",
 			parameters: pi.zod.object({}),
 			async execute(_id, _params, _onUpdate, _ctx, signal) {
-				const { spaces } = await ls(signal);
-				const selfSpace = spaces.find(s => s.tabs.some(t => t.terminals.some(term => term.terminal === self)));
+				const { spaces, selfSpace, hcId } = await view(signal);
 				const out = await Promise.all(
 					spaces
 						.filter(s => s !== selfSpace)
@@ -120,12 +138,13 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 									id: t.id,
 									name: t.name,
 									terminals: await Promise.all(
-										t.terminals.map(async term => {
+										t.terminals.map(async ({ terminal: id, app }) => {
+											const terminal = hcId(id);
 											// One dead terminal must not hide every other space.
-											const info = await get(term.terminal, signal).catch(() => undefined);
+											const info = await get(terminal, signal).catch(() => undefined);
 											return {
-												terminal: term.terminal,
-												app: info?.status?.app ?? term.app ?? null,
+												terminal,
+												app: info?.status?.app ?? app ?? null,
 												state: info?.status?.state ?? null,
 												turn: info?.turn ?? null,
 												title: info?.title ?? null,
@@ -174,33 +193,37 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			}),
 			async execute(_id, params, _onUpdate, _ctx, signal) {
 				if (params.beside === self) throw new Error("Refusing to split the orchestrator's own pane");
-				const { spaces } = await ls(signal);
+				const { spaces, hcId } = await view(signal);
 				let pane: string | undefined;
 				let space: string | undefined;
 				for (const s of spaces)
 					for (const t of s.tabs)
 						for (const term of t.terminals)
-							if (term.terminal === params.beside) {
+							if (hcId(term.terminal) === params.beside) {
 								pane = term.pane;
 								space = s.id;
 							}
 				if (!pane) throw new Error(`Terminal ${params.beside} has no pane in herdr-app ls`);
+				// space.new starts its argv in a login shell, but pane.split runs it as is, with the PATH
+				// herdr-core started with, which lacks ~/.local/bin (where omp is) on a remote machine.
+				const argv = ["sh", "-lc", 'exec omp "$@"', "sh", params.task];
 				const split = await runJson<{ pane: string; terminal: string }>(
 					"herdr-app",
-					["do", "pane.split", "--direction", "right", "--pane", pane, "--argv", JSON.stringify(["omp", params.task])],
+					["do", "pane.split", "--direction", "right", "--pane", pane, "--argv", JSON.stringify(argv)],
 					signal,
 				);
+				const terminal = hcId(split.terminal);
 				let info: HcGet = {};
 				const deadline = Date.now() + 45_000;
 				for (;;) {
-					info = await get(split.terminal, signal).catch(() => ({}) as HcGet);
+					info = await get(terminal, signal).catch(() => ({}) as HcGet);
 					const state = info.status?.state;
 					if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) break;
 					if (Date.now() >= deadline)
-						throw new Error(`omp on ${split.terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
+						throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
 					await sleep(500, signal);
 				}
-				return result({ space, pane: split.pane, terminal: split.terminal, turn: 0 });
+				return result({ space, pane: split.pane, terminal, turn: 0 });
 			},
 		},
 		{
@@ -219,12 +242,14 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 				const name = params.name.startsWith("tmp-") ? params.name : `tmp-${params.name}`;
 				const folder = params.folder ?? `/tmp/herdr-orchestrator/${name}`;
 				fs.mkdirSync(folder, { recursive: true });
+				// The space goes on the orchestrator's machine, where omp and this folder are.
+				const { machine, hcId } = await view(signal);
 				const created = await runJson<Created>(
 					"herdr-app",
-					["do", "space.new", "--name", name, "--folder", folder, "--argv", '["omp"]', "--task", params.task],
+					["do", "space.new", "--name", name, "--folder", folder, "--argv", '["omp"]', "--task", params.task, ...(machine ? ["--machine", machine] : [])],
 					signal,
 				);
-				return result({ space: created.space, tab: created.tab, terminal: created.terminal });
+				return result({ space: created.space, tab: created.tab, terminal: hcId(created.terminal) });
 			},
 		},
 		{
