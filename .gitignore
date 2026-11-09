@@ -2,3 +2,6 @@
 *.d.ts
 jsconfig.json
 *.bak*
+
+# Local sidebar data: pinned spaces and sections use work space names.
+herdr-app/spaces.json
