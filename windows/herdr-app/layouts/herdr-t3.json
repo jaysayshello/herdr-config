@@ -1,0 +1,207 @@
+{
+  "id": "root",
+  "cloned_from": {
+    "name": "main",
+    "version": "0.1.10"
+  },
+  "type": "row",
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "children": [
+        {
+          "id": "brand",
+          "type": "block",
+          "content": {
+            "mod": "t3-chrome"
+          },
+          "size": {
+            "px": 40
+          },
+          "window_drag": true
+        },
+        {
+          "id": "sidebar-lists",
+          "type": "stack",
+          "children": [
+            {
+              "id": "lists",
+              "type": "column",
+              "children": [
+                {
+                  "id": "spaces",
+                  "type": "block",
+                  "content": {
+                    "mod": "t3-spaces"
+                  },
+                  "size": {
+                    "weight": 1.0977803468704224
+                  },
+                  "min": 90
+                },
+                {
+                  "id": "prs",
+                  "type": "block",
+                  "content": {
+                    "mod": "t3-prs"
+                  },
+                  "size": {
+                    "weight": 1.1715784072875977
+                  },
+                  "min": 90
+                }
+              ]
+            },
+            {
+              "id": "inbox",
+              "type": "block",
+              "content": {
+                "mod": "t3-inbox",
+                "props": {
+                  "newMenu": "t3-new-menu"
+                }
+              }
+            }
+          ],
+          "active": "lists"
+        },
+        {
+          "id": "sidebar-footer",
+          "type": "block",
+          "content": {
+            "mod": "t3-chrome",
+            "props": {
+              "footer": true
+            }
+          },
+          "size": {
+            "px": 71
+          }
+        }
+      ],
+      "size": {
+        "px": 378
+      },
+      "min": 208,
+      "max": 480,
+      "background": "chrome",
+      "resizable": false
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "content": {
+            "mod": "t3-tabs"
+          },
+          "size": {
+            "px": 40
+          },
+          "hidden": true,
+          "window_drag": true
+        },
+        {
+          "id": "work-body",
+          "type": "row",
+          "children": [
+            {
+              "id": "view",
+              "type": "stack",
+              "children": [
+                {
+                  "id": "main",
+                  "type": "block",
+                  "content": {
+                    "tab": "active",
+                    "pane": {
+                      "background": "background",
+                      "border": {
+                        "width": 2,
+                        "color": "background"
+                      },
+                      "focus": {
+                        "width": 2,
+                        "color": "accent"
+                      },
+                      "radius": 8,
+                      "gap": 8,
+                      "lone": true
+                    }
+                  }
+                },
+                {
+                  "id": "agent",
+                  "type": "block",
+                  "content": {
+                    "agent": "focused"
+                  },
+                  "background": "background",
+                  "radius": 8
+                }
+              ],
+              "active": "main"
+            }
+          ],
+          "padding": [
+            12,
+            14
+          ],
+          "gap": 8
+        },
+        {
+          "id": "work-bottom-inset",
+          "type": "row",
+          "children": [
+            {
+              "id": "tmux-keys",
+              "type": "block",
+              "content": {
+                "mod": "tmux-keys"
+              },
+              "size": {
+                "px": 0
+              }
+            }
+          ],
+          "size": {
+            "px": 6
+          }
+        },
+        {
+          "id": "status",
+          "type": "block",
+          "content": {
+            "mod": "workspace-status"
+          },
+          "size": {
+            "px": 28
+          },
+          "hidden": true
+        }
+      ],
+      "resizable": false
+    }
+  ],
+  "background": "canvas",
+  "theme": "ghostty",
+  "font": "0xProto Nerd Font Mono",
+  "terminal_padding": [
+    8,
+    0
+  ],
+  "terminal_opacity": 0,
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "titlebar": "none",
+  "traffic_lights": [
+    16,
+    13
+  ],
+  "preview": "layouts/herdr-t3.svg"
+}

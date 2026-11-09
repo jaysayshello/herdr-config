@@ -1,0 +1,6 @@
+Wizard avatars made from Dungeon Crawl Stone Soup tiles (the DCSS tile artists).
+License: CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)
+Source: https://opengameart.org/content/dungeon-crawl-32x32-tiles (Dungeon Crawl Stone Soup Full)
+000-095: player doll parts layered (base, robe, beard, wizard hat, staff).
+096-117: mage monster tiles.
+Each file is the 20x20 top (hat and head) of a 32x32 tile, scaled 8x with nearest neighbor.
