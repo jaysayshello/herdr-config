@@ -18,19 +18,21 @@ Project folders look like `~/Projects/<words>-YYYY-MM-DD`, for example `~/Projec
 
 1. Pick an omp terminal in that space with state `idle` or `done`. If there are several, pick the one whose title is closest to the request.
 2. Send the task with `herdr_send`.
-3. If every omp terminal in that space is `working` or `blocked`, call `herdr_new_agent` beside one of them. This is for a new task only: more context for the task that a terminal runs now goes to that terminal (see "More context for a running task").
+3. If every omp terminal in that space is `working` or `blocked`, call `herdr_new_agent` beside one of them. Only a correction of the task that a terminal runs now goes to that terminal (see "Correct a running task").
 
 Never send to a `blocked` terminal. Tell the user which terminal is blocked so they can look at it.
 
-## More context for a running task
+## Correct a running task
 
-When the user sends a correction or more context for a task that a worker runs now (state `working`), stop that turn and send the new context yourself. Do not wait for the turn to end, and never ask the user to press Esc.
+Stop a working turn only when the user clearly corrects or changes the task that this terminal runs now, for example "use light blue instead" for the colour task that it runs, "stop", or "wrong repo". Then stop that turn and send the correction yourself. Do not wait for the turn to end, and never ask the user to press Esc.
 
-1. Call `herdr_send` with `interrupt: true` and the new context as `text`. Write the text so it stands alone: name the task it adds to, then the correction. The tool stops the turn, waits until the terminal is `idle` or `done`, and puts a note before your text. The note tells the worker that its turn was stopped, and that it must first put the repo back in a clean state (a stash that was not popped, a half commit, a branch switch, a command that still runs). Do not write that note yourself.
+1. Call `herdr_send` with `interrupt: true` and the correction as `text`. Write the text so it stands alone: name the task it changes, then the correction. The tool stops the turn, waits until the terminal is `idle` or `done`, and puts a note before your text. The note tells the worker that its turn was stopped, and that it must first put the repo back in a clean state (a stash that was not popped, a half commit, a branch switch, a command that still runs). Do not write that note yourself.
 2. Call `herdr_watch` again, as in "After you send: stay free", with `after_turn` set to the `turn` from this `herdr_send` result and the same `prompt` summary as before. It replaces the old watch of that terminal, so the old one does not report. If that terminal has a `herdr-watcher` task from the fallback, stop it first: `write` to `proc://<id>/kill` with no content.
-3. Tell the user in one report box with three rows: the `Prompt:` row, `Sent: turn stopped, new context sent`, and the `More:` row.
+3. Tell the user in one report box with three rows: the `Prompt:` row, `Sent: turn stopped, correction sent`, and the `More:` row.
 
-This is only for the task that the terminal runs now. A new, separate task goes to `herdr_new_agent` beside the busy terminal, as above. If the terminal is `blocked`, do not interrupt it: `herdr_send` refuses, because a key press can answer its dialog. If the terminal is already `idle` or `done`, use `herdr_send` as usual.
+If the terminal is `blocked`, do not interrupt it: `herdr_send` refuses, because a key press can answer its dialog. If the terminal is already `idle` or `done`, use `herdr_send` as usual.
+
+In most other cases a new agent is the right path. New work, related follow-up work (such as a second update to the same sheet), and a question while the worker is busy go to `herdr_new_agent` beside the busy terminal (see "Another agent"). Do not interrupt for them. If it is not clear that the request corrects the running task, use a new agent.
 
 ## Another agent
 
@@ -38,7 +40,7 @@ When the user asks for "another agent", "a new agent", "a second session", or si
 
 - Space: the space the user names. If the user names none, use the space of the last task in this conversation, and say which one you picked.
 - `beside`: the omp terminal the user means, or the one that runs the related job. If several fit, pick the one whose title is closest to the request.
-- If the new task edits the same files as a session that is `working` in that space, tell the user about the conflict risk before you start it.
+- If the new task can write the same file, sheet, or branch as a session that is `working` in that space, tell the user about the conflict risk in a `Risk:` line. In the task text, tell the new agent which rows or files it owns.
 
 If `herdr_send` throws a "Prompt did not start" error, do not send the text again: it can still arrive and run twice. Call `herdr_new_agent` beside that terminal, and tell the user that the send failed and a new session beside it got the task. Call `herdr_watch` on the new terminal with `after_turn: 0`.
 
