@@ -283,7 +283,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_wait",
 			label: "Herdr Wait",
 			description:
-				"Block until the omp session in a terminal starts a turn after after_turn and then stops working, or until timeout_s (default 600) passes. Use this after herdr_send, herdr_new_agent, or herdr_new_space (after_turn 0 for new terminals). started false means no turn began within 60 s, so the prompt did not start. timed_out true means it is still working.",
+				"Block until the omp session in a terminal starts a turn after after_turn and then stops working, or until timeout_s (default 600) passes. Use this after herdr_send, herdr_new_agent, or herdr_new_space (after_turn 0 for new terminals). started false means no turn began within 60 s, so the prompt did not start. timed_out true means it is still working. Also returns the terminal's space name and space_id.",
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				terminal: pi.zod.string(),
@@ -324,6 +324,8 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 
 				return result({
 					terminal: params.terminal,
+					space: info.labels?.where?.split(" / ")[0] ?? null,
+					space_id: info.labels?.["herdr.space"] ?? null,
 					state: state(),
 					turn: turn(),
 					started: didBegin,
