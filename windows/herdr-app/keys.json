@@ -96,6 +96,7 @@
     "ctrl-l": "tmux-keys.swap-right",
     "ctrl-n": "tmux-keys.new-space",
     "ctrl-shift-h": "t3-chrome.bars",
+    "ctrl-shift-u": "layout.toggle:usage",
     "ctrl-w": "tmux-keys.nav-up",
     "ctrl-s": "tmux-keys.nav-down",
     "ctrl-f": "tmux-keys.orchestrator",

@@ -12,7 +12,9 @@ cd "$(dirname "$0")"
 # Only what I made. Herdr's shipped mods/layouts/themes, run-time state (shared.json, view.json,
 # window.json, data/, sockets, logs) and generated files (*.d.ts, jsconfig.json) stay out.
 # spaces.json (pinned spaces and sections) stays out too: it holds the names of work spaces.
+# The shared Mac/Windows mod set stays separate from Windows-only additions.
 MODS=$(for m in t3-agents t3-chrome t3-inbox t3-menu t3-new-menu t3-pane t3-prs t3-spaces t3-tabs tmux-keys; do echo "mods/$m"; done)
+WINDOWS_MODS="$MODS mods/t3-usage"
 ORCHESTRATOR="$HOME/Projects/herdr-orchestrator-2026-11-08/.omp"
 EXCLUDE="--exclude=*.d.ts --exclude=jsconfig.json --exclude=.DS_Store --exclude=*.bak*"
 WSL=$(grep -qi microsoft /proc/version 2>/dev/null && echo 1 || true)
@@ -38,7 +40,7 @@ if [ -n "$WSL" ]; then
   WIN_HOME=$(wslpath "$(cd /mnt/c && /mnt/c/Windows/System32/cmd.exe /c 'echo %USERPROFILE%' | tr -d '\r')")
   # shellcheck disable=SC2086
   sync "$WIN_HOME/.config/herdr-app" windows/herdr-app \
-    keys.json settings.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts $MODS
+    keys.json settings.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts $WINDOWS_MODS
   # omp: per-terminal session resume (the bash side; ~/.bashrc sources it) and the hourly `omp update`.
   sync "$HOME/.config/herdr-wsl" windows/wsl omp-resume.bash
   sync "$HOME/.config/systemd/user" windows/wsl/systemd omp-update.service omp-update.timer
