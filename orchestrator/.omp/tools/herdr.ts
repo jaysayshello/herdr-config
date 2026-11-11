@@ -183,7 +183,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_send",
 			label: "Herdr Send",
 			description:
-				"Send a task as a prompt to an omp session in another Herdr terminal. Use this when herdr_spaces shows a matching space with an omp terminal in state idle or done. Refuses other apps, busy terminals, and the orchestrator's own terminal. With interrupt: true it also takes a working terminal: for a correction or more context for the task that terminal runs now, it stops the turn (hc interrupt, as Esc does), waits until the terminal is idle or done, and sends the text after a note that tells the worker its turn was stopped and to clean up first. It never sends to a blocked terminal, with or without interrupt: a key press can answer its dialog. Waits up to 15 s for the prompt to start and throws a 'Prompt did not start' error if it does not; then use herdr_new_agent beside that terminal and do not send again. Returns the turn before the send (pass it to herdr_wait as after_turn) and interrupted: whether a turn was stopped.",
+				"Send a task as a prompt to an omp session in another Herdr terminal. Use this when herdr_spaces shows a matching space with an omp terminal in state idle or done. Refuses other apps, busy terminals, and the orchestrator's own terminal. With interrupt: true it also takes a working terminal: only for a clear correction of the task that terminal runs now (new or related work goes to herdr_new_agent), it stops the turn (hc interrupt, as Esc does), waits until the terminal is idle or done, and sends the text after a note that tells the worker its turn was stopped and to clean up first. It never sends to a blocked terminal, with or without interrupt: a key press can answer its dialog. Waits up to 15 s for the prompt to start and throws a 'Prompt did not start' error if it does not; then use herdr_new_agent beside that terminal and do not send again. Returns the turn before the send (pass it to herdr_wait as after_turn) and interrupted: whether a turn was stopped.",
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				terminal: pi.zod.string(),
@@ -202,7 +202,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 				const interrupted = params.interrupt === true && state === "working";
 				if (interrupted) info = await stop(params.terminal, signal);
 				else if (state !== "idle" && state !== "done") {
-					throw new Error(`Terminal ${params.terminal} is ${state ?? "unknown"}; send only when idle or done, or pass interrupt: true for more context on its current task`);
+					throw new Error(`Terminal ${params.terminal} is ${state ?? "unknown"}; send only when idle or done, pass interrupt: true only to correct its current task, or use herdr_new_agent`);
 				}
 				const text = interrupted ? `${STOPPED_NOTE}\n\n${params.text}` : params.text;
 				return result({ terminal: params.terminal, turn: await deliver(params.terminal, text, info, signal), interrupted });
