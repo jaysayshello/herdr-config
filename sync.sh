@@ -67,6 +67,8 @@ if [ -n "$RESTORE" ]; then
     systemctl --user daemon-reload && systemctl --user enable --now omp-update.timer
     echo "Restored. Herdr reloads keys, layouts and mods by itself."
   else
+    # herdr-focus:// links (the orchestrator's More rows) open with the Herdr Focus applet.
+    "$HOME/.config/herdr-app/scripts/herdr-focus-install.sh"
     echo "Restored. For the terminal app, run: herdr server reload-config"
     echo "For omp updates, run: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.jay.omp-update.plist"
   fi
