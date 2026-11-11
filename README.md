@@ -35,7 +35,7 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `omp/launchagents/com.jay.omp-update.plist` | Runs `omp update` at login and each hour. Restores to `~/Library/LaunchAgents/` |
 | `orchestrator/.omp/` | The orchestrator space: `APPEND_SYSTEM.md` (its prompt), `agents/herdr-watcher.md`, `tools/herdr.ts` (`herdr_spaces`, `herdr_send`, `herdr_new_agent`, `herdr_new_space`, `herdr_wait`, `herdr_read`, `herdr_close_space`). The tools also work from WSL, where `herdr-app ls` names terminals `wsl/t8` and `hc` knows them as `t8`. Restores to `~/Projects/herdr-orchestrator-2026-11-08/.omp/` |
 | `windows/herdr-app/` | The Windows desktop app (`C:\Users\<me>\.config\herdr-app`): Windows variants of the layout and common mods, plus Windows-only additions, with Windows keys (`ctrl`/`alt` for `cmd`; new spaces open in WSL), `balance-panes.ps1`, macOS-style window buttons at the top left (`t3-chrome/lights.js`, copied into `t3-tabs`), and one Spaces list: WSL's spaces, then this computer's, with no machine headers |
-| `windows/herdr-app/mods/t3-usage/` | Windows-only AI usage panel and PowerShell collector: today's local Claude Code and OpenAI token activity plus supported live provider quota windows |
+| `windows/herdr-app/mods/t3-usage/` | Windows-only AI usage panel and PowerShell collector: today's local Claude Code and OpenAI token activity plus supported live provider quota windows. Hide or show it with `ctrl-shift-u` or the sidebar footer's `Hide/Show AI usage` row (Windows `t3-chrome` footer) |
 | `windows/wsl/omp-resume.bash` | The bash side of omp session resume (the zsh one is in my dotfiles repo). Restores to `~/.config/herdr-wsl/` |
 | `windows/wsl/systemd/` | `omp-update.service` and `.timer`: `omp update` a minute after start and each hour, as the LaunchAgent does. Restores to `~/.config/systemd/user/` |
 
@@ -78,6 +78,15 @@ A Claude snapshot is current only for 60 minutes and while its reset is still in
 The schema-2 collector output contains only timestamps, local token counts, safe model/plan labels, quota state, and validated window percentages and resets. It never exposes authentication tokens, cookies, account IDs, prompts, tool data, raw transcript records, paths, stderr, or raw broker/protocol responses. Provider collection is isolated so a timeout, malformed source, or unavailable quota for one does not suppress the other.
 
 The panel refreshes every five minutes without overlapping collector runs and keeps only sanitized last-successful data in local storage. Its initial refresh runs from a zero-delay timer after the first render, so `herdr-app check` can render and exit without contacting a live broker. Manual refresh is the heading's refresh icon, or `herdr-app do t3-usage.refresh` (bindable in `keys.json`).
+
+### Hide and show
+
+- **Hide:** click the `×` next to the refresh icon in the panel's heading, click **Hide AI usage** in the sidebar footer, or press `ctrl-shift-u`.
+- **Show again:** click **Show AI usage** in the sidebar footer (it stays there while the panel is hidden), or press `ctrl-shift-u`. From a script: `herdr-app do layout.show --id usage` (`layout.hide` / `layout.toggle` likewise).
+
+All of these use Herdr's own `layout.hide`/`layout.toggle` on the panel's layout node, `usage`. A hidden node takes no space, so the sidebar lists grow into it. Herdr keeps the choice across restarts in `%USERPROFILE%\.config\herdr-app\layouts\.state\herdr-t3.json` (`nodes.usage.hidden`). If that file is ever reset, the panel shows again. Herdr keeps a hidden block's mod alive, so the panel checks on every timer tick and skips the collector while hidden: no PowerShell, Codex app-server or file scans run. Showing it again refreshes at once.
+
+### Checks
 
 For the deterministic narrow collector check from Windows (it always runs the collector with live quota skipped):
 

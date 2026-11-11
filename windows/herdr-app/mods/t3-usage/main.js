@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { appHome, exec, nextCommand, theme } from "herdr";
+import { appHome, exec, layout, nextCommand, run, theme } from "herdr";
 
 const EVERY = 5 * 60 * 1000;
 const STALE_AFTER = 60 * 60 * 1000;
@@ -179,6 +179,21 @@ function windowLabel(minutes) {
   return `${minutes}m`;
 }
 
+// The panel's layout node. Hiding it is Herdr's own `layout.hide`/`layout.toggle` on this id:
+// the sidebar reflows with no gap, and Herdr keeps the choice across restarts (layouts/.state).
+const NODE = "usage";
+
+function findNode(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+const panelHidden = () => Boolean(findNode(layout(), NODE)?.hidden);
+
 function providerModel(provider) {
   const labels = [provider?.model, provider?.serviceTier, provider?.quota?.plan].filter(Boolean);
   return labels.filter((label, index) => labels.indexOf(label) === index).join(" · ");
@@ -189,13 +204,24 @@ export default class UsagePanel extends View {
     this.data = cachedUsage();
     this.loading = false;
     this.failed = false;
-    cx.timer.every(EVERY, (cx) => this.refresh(cx));
-    cx.timer.after(0, (cx) => this.refresh(cx));
+    // Herdr keeps a hidden block's copy and its timers alive, so each tick checks first and
+    // skips the collector while the panel is hidden; showing it again refreshes at once.
+    this.skipped = false;
+    cx.timer.every(EVERY, (cx) => this.poll(cx));
+    cx.timer.after(0, (cx) => this.poll(cx));
     cx.spawn(async (cx) => {
       for (;;) {
         if (await nextCommand() === "refresh") this.refresh(cx, true);
       }
     });
+  }
+
+  poll(cx) {
+    if (panelHidden()) {
+      this.skipped = true;
+      return;
+    }
+    this.refresh(cx);
   }
 
 
@@ -323,8 +349,12 @@ export default class UsagePanel extends View {
       .child(div().min_w(0).truncate().text_size(10).text_color(localColor).child(localText));
   }
 
-  render() {
+  render(cx) {
     const t = theme();
+    if (this.skipped && !panelHidden()) {
+      this.skipped = false;
+      cx.timer.after(0, (cx) => this.refresh(cx));
+    }
     const claude = this.data?.claude;
     const openai = this.data?.openai;
 
@@ -348,7 +378,16 @@ export default class UsagePanel extends View {
           .text_color(t.dim)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_click((_event, cx) => { this.refresh(cx, true); })
-          .child(svg("mods/t3-usage/refresh.svg").size(13).when(this.loading, (el) => el.spin(900)))))
+          .child(svg("mods/t3-usage/refresh.svg").size(13).when(this.loading, (el) => el.spin(900))))
+        .child(div()
+          .id("usage-hide")
+          .size(26).flex_none().flex().items_center().justify_center().rounded(6)
+          .role("button").accessibility_label("Hide AI usage (Ctrl+Shift+U shows it again)")
+          .tooltip("Hide AI usage · Ctrl+Shift+U or the sidebar footer shows it again")
+          .text_color(t.dim)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click(() => run("layout.hide", { id: NODE }))
+          .child(svg("mods/workspace-chrome/x.svg").size(13))))
       .child(this.providerCard(t, "claude", "Claude Code", claude))
       .child(this.providerCard(t, "openai", "OpenAI", openai));
   }
