@@ -12,6 +12,9 @@
 // Comments: a speech bubble with the count of comments people (not bots) left (comments.js).
 // Blue when some came after your last comment and after you last opened the PR from this list;
 // dim when you saw them all. Opening the PR (click or Enter) marks them seen.
+// Merged: your last 20 merged pull requests (not closed ones), newest merge first, with the merge
+// time in Eastern time. The same query fetches them, so a poll stays one call (cost 1 point).
+// Headers fold their group on a click or `t3-prs.fold:<ready|draft|merged>`; folds are kept.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -23,7 +26,9 @@ const EVERY = 5000;
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
   nodes { number title isDraft url headRefOid baseRefName reviewDecision updatedAt author { login } repository { name nameWithOwner }
     latestReviews(first: 20) { nodes { state author { login } } }
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }`;
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
+  merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    nodes { number title url mergedAt repository { name } } } } }`;
 
 // GitHub GraphQL through gh: `data`, or an error with gh's message.
 async function gql(query, vars = {}) {
@@ -39,11 +44,33 @@ const CI = { SUCCESS: "passed", FAILURE: "failed", ERROR: "failed", PENDING: "ru
 // The frame of a pull request that is ready to merge.
 const READY = "#4ade80";
 
+// Mods have no Intl, and Date only knows the computer's own zone: work out US Eastern by hand.
+// Daylight time runs from the second Sunday of March, 2 AM (07:00 UTC), to the first Sunday of
+// November, 2 AM (06:00 UTC). Returns a Date whose UTC fields read as Eastern wall time.
+function eastern(ms) {
+  const y = new Date(ms).getUTCFullYear();
+  const sunday = (month, n) => 1 + ((7 - new Date(Date.UTC(y, month, 1)).getUTCDay()) % 7) + 7 * (n - 1);
+  const daylight = ms >= Date.UTC(y, 2, sunday(2, 2), 7) && ms < Date.UTC(y, 10, sunday(10, 1), 6);
+  return new Date(ms - (daylight ? 4 : 5) * 3600_000);
+}
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// "2:18 PM" for a merge today (Eastern), else "Nov 10, 2:18 PM".
+function mergedAt(iso, now = Date.now()) {
+  const d = eastern(Date.parse(iso));
+  const today = eastern(now);
+  const h = d.getUTCHours();
+  const time = `${h % 12 || 12}:${String(d.getUTCMinutes()).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+  const same = d.getUTCFullYear() === today.getUTCFullYear() && d.getUTCMonth() === today.getUTCMonth() && d.getUTCDate() === today.getUTCDate();
+  return same ? time : `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${time}`;
+}
+
 export default class PullRequests extends View {
   init(_props, cx) {
     // The right-click menu is this mod as a popup: it only draws.
     if (props()?.menu) return;
     this.prs = JSON.parse(localStorage.getItem("prs") ?? "null");
+    this.merged = JSON.parse(localStorage.getItem("merged") ?? "null");
     this.error = null;
     this.loading = false;
     this.manual = false;
@@ -70,6 +97,7 @@ export default class PullRequests extends View {
         if (c === "down") this.down();
         else if (c === "up") this.up();
         else if (c.startsWith("close:")) await this.close(c.slice(6), cx);
+        else if (c.startsWith("fold:")) this.fold(c.slice(5));
         cx.notify();
       }
     });
@@ -78,7 +106,16 @@ export default class PullRequests extends View {
   // The pull requests in the order they show (folded groups skipped).
   visible() {
     const prs = this.prs ?? [];
-    return [...prs.filter((p) => !p.draft && !this.folded.ready), ...prs.filter((p) => p.draft && !this.folded.draft)];
+    return [
+      ...prs.filter((p) => !p.draft && !this.folded.ready),
+      ...prs.filter((p) => p.draft && !this.folded.draft),
+      ...(this.folded.merged ? [] : this.merged ?? []),
+    ];
+  }
+
+  fold(id) {
+    this.folded[id] = !this.folded[id];
+    localStorage.setItem("folded", JSON.stringify(this.folded));
   }
 
   active() {
@@ -136,11 +173,15 @@ export default class PullRequests extends View {
     }
     if (this.loading) return;
     this.loading = true;
-    const before = JSON.stringify([this.prs, this.error]);
+    const before = JSON.stringify([this.prs, this.merged, this.error]);
     try {
       const r = await exec("gh", ["api", "graphql", "-f", `query=${QUERY}`]);
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh exited with ${r.code}`);
-      this.prs = JSON.parse(r.stdout).data.viewer.pullRequests.nodes.map((p) => ({
+      const viewer = JSON.parse(r.stdout).data.viewer;
+      this.merged = viewer.merged.nodes
+        .map((p) => ({ number: p.number, title: p.title, url: p.url, repo: p.repository.name, mergedAt: p.mergedAt }))
+        .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
+      this.prs = viewer.pullRequests.nodes.map((p) => ({
         number: p.number,
         title: p.title,
         draft: p.isDraft,
@@ -160,8 +201,11 @@ export default class PullRequests extends View {
       this.error = String(e.message ?? e);
     }
     this.loading = false;
-    const changed = JSON.stringify([this.prs, this.error]) !== before;
-    if (changed && !this.error) localStorage.setItem("prs", JSON.stringify(this.prs));
+    const changed = JSON.stringify([this.prs, this.merged, this.error]) !== before;
+    if (changed && !this.error) {
+      localStorage.setItem("prs", JSON.stringify(this.prs));
+      localStorage.setItem("merged", JSON.stringify(this.merged));
+    }
     if (changed || this.manual) {
       this.manual = false;
       cx.notify();
@@ -185,10 +229,12 @@ export default class PullRequests extends View {
     if (changed) cx.notify();
   }
 
-  // Opening a pull request from this list marks its comments seen.
+  // Opening an open pull request from this list marks its comments seen.
   open(url) {
-    this.seen[url] = new Date().toISOString();
-    localStorage.setItem("seen", JSON.stringify(this.seen));
+    if ((this.prs ?? []).some((p) => p.url === url)) {
+      this.seen[url] = new Date().toISOString();
+      localStorage.setItem("seen", JSON.stringify(this.seen));
+    }
     exec("open", [url]).catch(() => null);
   }
 
@@ -298,6 +344,33 @@ export default class PullRequests extends View {
       .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(p.repo));
   }
 
+  // A merged pull request: read only, so no right-click menu.
+  mergedRow(t, p) {
+    const on = this.active() && this.cursor === p.url;
+    const when = mergedAt(p.mergedAt);
+    return h_flex()
+      .id(`merged-${p.repo}-${p.number}`)
+      .w_full().min_w(0)
+      .px(8)
+      .h(30)
+      .flex_none()
+      .rounded(8)
+      .items_center()
+      .gap(8)
+      .role("button").accessibility_label(`${p.repo} #${p.number} ${p.title}, merged ${when}`)
+      .tooltip(`${p.repo} #${p.number}: ${p.title}\nMerged ${when} ET`)
+      .border(1).border_color("#00000000")
+      .when(on, (el) => el.bg(t.accent + "8c").border_color(t.accent))
+      .when(!on, (el) => el.hover((s) => s.bg(t.foreground + "40").border_color(t.foreground + "59")))
+      .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
+      .child(h_flex().size(18).flex_none().items_center().justify_center().accessibility_label("Merged")
+        .child(svg("mods/t3-prs/pr-merged.svg").size(13).text_color(t.ansi5)))
+      .child(div().flex_none().text_color(on ? t.muted : t.dim).child(`#${p.number}`))
+      .child(div().min_w(0).truncate().text_color(t.muted).child(p.title))
+      .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(p.repo))
+      .child(div().flex_none().text_size(12).text_color(t.dim).child(when));
+  }
+
   header(t, id, label, count, first, cx) {
     const open = !this.folded[id];
     return h_flex()
@@ -311,8 +384,7 @@ export default class PullRequests extends View {
       .text_size(11)
       .font_medium()
       .on_click(() => {
-        this.folded[id] = open;
-        localStorage.setItem("folded", JSON.stringify(this.folded));
+        this.fold(id);
         cx.notify();
       })
       .child(div().text_color(t.dim).child(label))
@@ -348,12 +420,13 @@ export default class PullRequests extends View {
     if (props()?.menu) return this.menu(t, props().menu);
     const prs = this.prs ?? [];
     const groups = [
-      { id: "ready", label: "Ready", members: prs.filter((p) => !p.draft) },
-      { id: "draft", label: "Draft", members: prs.filter((p) => p.draft) },
+      { id: "ready", label: "Ready", members: prs.filter((p) => !p.draft), row: (p) => this.row(t, p) },
+      { id: "draft", label: "Draft", members: prs.filter((p) => p.draft), row: (p) => this.row(t, p) },
+      { id: "merged", label: "Merged", members: this.merged ?? [], row: (p) => this.mergedRow(t, p) },
     ].filter((g) => g.members.length);
     const rows = groups.flatMap((g, i) => [
       this.header(t, g.id, g.label, g.members.length, i === 0, cx),
-      ...(this.folded[g.id] ? [] : g.members.map((p) => this.row(t, p))),
+      ...(this.folded[g.id] ? [] : g.members.map(g.row)),
     ]);
     const note = this.error ? `Could not load pull requests: ${this.error}`
       : this.prs == null ? "Loading pull requests…"

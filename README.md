@@ -28,7 +28,7 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `herdr-app/scripts/balance-panes.sh` | Equal pane sizes for `ctrl-r` |
 | `herdr-app/scripts/herdr-focus.sh` | Opens a `herdr-focus://<space-id>/<terminal>` link: shows that terminal and pulses its pane border bright green for about 6 s. Herdr draws the focus border only on the focused pane, so the script switches the layout's focus colour, then puts the layout file back. `herdr-focus.applescript` is the macOS handler for the scheme; `herdr-focus-install.sh` builds it as `~/Applications/Herdr Focus.app` (`sync.sh --restore` runs it) |
 | `herdr-app/mods/tmux-keys/` | Keys that need logic: vim-aware swap, balance, new space in `~/Projects`, PR list navigation |
-| `herdr-app/mods/t3-prs/` | Pull requests panel: CI state, code owner approval, comment count, bright green frame when ready to merge, right-click copy (`slackpr`) and close |
+| `herdr-app/mods/t3-prs/` | Pull requests panel: CI state, code owner approval, comment count, bright green frame when ready to merge, right-click copy (`slackpr`) and close; a foldable Merged section with the last 20 merged PRs, newest first, merge time in Eastern time |
 | `herdr-app/mods/t3-spaces/` | Spaces list: wizard avatars, working spinner, done glow, pinned spaces and sections, orchestrator frame |
 | `herdr-app/mods/t3-chrome/` | Sidebar chrome, tab bar toggle (`cmd-shift-h`) |
 | `herdr-app/mods/t3-*` | Other cloned mods the layout uses (tabs, pane header, inbox, new menu, agents) |
