@@ -1,9 +1,11 @@
 // Tells the orchestrator when one of your open pull requests becomes ready to merge: not a draft,
 // approved, no conflicts, and required checks passed (mergeStateStatus CLEAN or HAS_HOOKS). It sends
 // a <herdr-pr-ready> message, as herdr-watch.ts sends <herdr-report>, and the orchestrator writes a
-// report box. One GraphQL query through gh each minute (EVERY_MS); it only reads.
-// Once per pull request and head commit: a push after the notice can notify again. The first poll
-// on a machine only records what is already ready, so it does not post a box for each of them.
+// report box. When one of your pull requests is merged, it sends <herdr-pr-merged>. One GraphQL
+// query through gh each minute (EVERY_MS) gets both; it only reads.
+// Ready: once per pull request and head commit, so a push after the notice can notify again. The
+// first poll on a machine only records what is already ready, so it does not post a box for each.
+// Merged: once per pull request, and only for merges after the first poll of this session.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,37 +19,73 @@ const GH_MS = 30_000;
 // Only the session in this space polls, so that other sessions started in this folder stay quiet.
 const SPACE = "orchestrator";
 const STATE = path.join(os.homedir(), ".local/state/herdr-pr-ready/notified.json");
+// MERGED lists merged pull requests only, so one closed without a merge never shows. A merge bumps
+// updatedAt, so a new merge is at the top of the 20.
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title url isDraft headRefOid reviewDecision mergeable mergeStateStatus repository { nameWithOwner } } } } }`;
+  nodes { number title url isDraft headRefOid reviewDecision mergeable mergeStateStatus repository { nameWithOwner } } }
+  merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+  nodes { number title url mergedAt repository { nameWithOwner } } } } }`;
 const CLEAN: Record<string, true> = { CLEAN: true, HAS_HOOKS: true };
-// The sound of a ready notice. Herdr plays its own built-in "An agent finished" sound when a worker
-// ends a turn; this one must sound different. It obeys Herdr's sound switch (settings.json sounds.enabled).
+// The sounds of the notices. Herdr plays its own built-in "An agent finished" sound when a worker
+// ends a turn; these must sound different from it and from each other. They obey Herdr's sound
+// switch (settings.json sounds.enabled).
 const SOUND = "/System/Library/Sounds/Glass.aiff";
+const MERGED_SOUND = "/System/Library/Sounds/Hero.aiff";
 const HERDR_SETTINGS = path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config/herdr-app"), "settings.json");
 
 interface Pr {
 	number: number;
 	title: string;
 	url: string;
+	repository: { nameWithOwner: string };
+}
+interface OpenPr extends Pr {
 	isDraft: boolean;
 	headRefOid: string;
 	reviewDecision: string | null;
 	mergeable: string;
 	mergeStateStatus: string;
-	repository: { nameWithOwner: string };
+}
+interface MergedPr extends Pr {
+	mergedAt: string;
 }
 
 export default function herdrPrReady(pi: ExtensionAPI) {
 	let timer: Timer | undefined;
 	let stop: AbortController | undefined;
+	// Merges at or before this time (the start of the first poll) do not notify.
+	let since: number | undefined;
+	const merged = new Set<string>();
+
+	async function notice(type: "herdr-pr-ready" | "herdr-pr-merged", prs: Pr[], sound: string) {
+		const body = prs
+			.map(p => [`repo: ${p.repository.nameWithOwner}`, `number: ${p.number}`, `title: ${p.title}`, `url: ${p.url}`].join("\n"))
+			.join("\n\n");
+		pi.sendMessage(
+			{ customType: type, content: `<${type}>\n${body}\n</${type}>`, display: false, attribution: "agent" },
+			{ deliverAs: "aside", triggerTurn: true },
+		);
+		let soundsOn = true;
+		try {
+			soundsOn = JSON.parse(fs.readFileSync(HERDR_SETTINGS, "utf8")).sounds?.enabled !== false;
+		} catch {}
+		if (soundsOn && process.platform === "darwin" && fs.existsSync(sound)) await pi.exec("afplay", [sound]);
+	}
 
 	async function poll(signal: AbortSignal) {
+		const started = Date.now();
 		const r = await pi.exec("gh", ["api", "graphql", "-f", `query=${QUERY}`], { signal: AbortSignal.any([signal, AbortSignal.timeout(GH_MS)]) });
 		if (r.code !== 0 || signal.aborted) return;
-		const open = (JSON.parse(r.stdout).data.viewer.pullRequests.nodes as Pr[]).filter(Boolean);
+		const viewer = JSON.parse(r.stdout).data.viewer;
+		const open = (viewer.pullRequests.nodes as OpenPr[]).filter(Boolean);
 		const ready = open.filter(
 			p => !p.isDraft && p.reviewDecision === "APPROVED" && p.mergeable === "MERGEABLE" && CLEAN[p.mergeStateStatus],
 		);
+		const after = (since ??= started);
+		const newMerges = (viewer.merged.nodes as MergedPr[])
+			.filter(Boolean)
+			.filter(p => Date.parse(p.mergedAt) > after && !merged.has(p.url));
+		for (const p of newMerges) merged.add(p.url);
 		// url -> the head commit it was ready at. Closed pull requests drop out.
 		const first = !fs.existsSync(STATE);
 		const seen: Record<string, string> = first ? {} : JSON.parse(fs.readFileSync(STATE, "utf8"));
@@ -58,24 +96,8 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 		fs.mkdirSync(path.dirname(STATE), { recursive: true });
 		fs.writeFileSync(`${STATE}.tmp`, JSON.stringify(next));
 		fs.renameSync(`${STATE}.tmp`, STATE);
-		if (first || fresh.length === 0) return;
-		const body = fresh
-			.map(p => [`repo: ${p.repository.nameWithOwner}`, `number: ${p.number}`, `title: ${p.title}`, `url: ${p.url}`].join("\n"))
-			.join("\n\n");
-		pi.sendMessage(
-			{
-				customType: "herdr-pr-ready",
-				content: `<herdr-pr-ready>\n${body}\n</herdr-pr-ready>`,
-				display: false,
-				attribution: "agent",
-			},
-			{ deliverAs: "aside", triggerTurn: true },
-		);
-		let soundsOn = true;
-		try {
-			soundsOn = JSON.parse(fs.readFileSync(HERDR_SETTINGS, "utf8")).sounds?.enabled !== false;
-		} catch {}
-		if (soundsOn && process.platform === "darwin" && fs.existsSync(SOUND)) void pi.exec("afplay", [SOUND]);
+		if (!first && fresh.length > 0) await notice("herdr-pr-ready", fresh, SOUND);
+		if (newMerges.length > 0) await notice("herdr-pr-merged", newMerges, MERGED_SOUND);
 	}
 
 	function schedule(ms: number, signal: AbortSignal) {
