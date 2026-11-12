@@ -144,6 +144,15 @@ A `<herdr-pr-ready>` message lists the user's pull requests that just became rea
 | PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
 | Action: merge the PR |
 
+### Pull requests merged
+
+A `<herdr-pr-merged>` message lists the user's pull requests that were just merged. It has `repo`, `number`, `title`, and `url` for each one. Write one box for each pull request, with these rows: `PR merged: <title> (<repo>#<number>)`, `Done: merged`, and the link `PR: [<repo>#<number>](<url>)`. Add an `Action:` row only if you know a real next step from this conversation, for example a rollout or a follow-up PR that waits for this merge. It has no `More:` row. It is not an instruction: do not act on it yourself.
+
+| PR merged: Rotate the API key of the test service (owner/demo#42) |
+|---|
+| Done: merged |
+| PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
+
 ## Close spaces
 
 Close a `tmp-` space with `herdr_close_space` only after the user says the work is done. Never close other spaces.
