@@ -31,7 +31,11 @@ const CLEAN: Record<string, true> = { CLEAN: true, HAS_HOOKS: true };
 // switch (settings.json sounds.enabled).
 const SOUND = "/System/Library/Sounds/Glass.aiff";
 const MERGED_SOUND = "/System/Library/Sounds/Hero.aiff";
-const HERDR_SETTINGS = path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config/herdr-app"), "settings.json");
+const HERDR_HOME = process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config/herdr-app");
+const HERDR_SETTINGS = path.join(HERDR_HOME, "settings.json");
+// The banner of a worker-done notice: Herdr's toast mod sends each notify() to this script, which
+// draws it above the Herdr window. A click brings Herdr forward, where the box has the PR link.
+const HERDR_ALERT = path.join(HERDR_HOME, "scripts/herdr-alert.sh");
 
 interface Pr {
 	number: number;
@@ -58,6 +62,7 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 	const merged = new Set<string>();
 
 	async function notice(type: "herdr-pr-ready" | "herdr-pr-merged", prs: Pr[], sound: string) {
+		const title = type === "herdr-pr-ready" ? "Pull request ready to merge" : "Pull request merged";
 		const body = prs
 			.map(p => [`repo: ${p.repository.nameWithOwner}`, `number: ${p.number}`, `title: ${p.title}`, `url: ${p.url}`].join("\n"))
 			.join("\n\n");
@@ -65,6 +70,9 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 			{ customType: type, content: `<${type}>\n${body}\n</${type}>`, display: false, attribution: "agent" },
 			{ deliverAs: "aside", triggerTurn: true },
 		);
+		if (fs.existsSync(HERDR_ALERT))
+			for (const p of prs)
+				await pi.exec(HERDR_ALERT, [title, `${p.repository.nameWithOwner}#${p.number}: ${p.title}`, "success", "", "", ""]);
 		let soundsOn = true;
 		try {
 			soundsOn = JSON.parse(fs.readFileSync(HERDR_SETTINGS, "utf8")).sounds?.enabled !== false;
