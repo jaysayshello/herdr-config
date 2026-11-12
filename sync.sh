@@ -52,9 +52,9 @@ else
   # omp: the hourly `omp update` LaunchAgent (the `omp` zsh function for resume is in my dotfiles repo).
   sync "$HOME/Library/LaunchAgents" omp/launchagents com.jay.omp-update.plist
 fi
-# omp: per-terminal session resume, and the orchestrator space's prompt, agents, herdr_* tools, herdr_watch and PR ready notices.
+# omp: per-terminal session resume, and the orchestrator space's prompt, agents, herdr_* tools, herdr_watch, PR ready notices and /reload.
 sync "$HOME/.omp/agent" omp extensions/herdr-resume.ts
-sync "$ORCHESTRATOR" orchestrator/.omp APPEND_SYSTEM.md agents tools extensions/herdr-watch.ts extensions/herdr-pr-ready.ts
+sync "$ORCHESTRATOR" orchestrator/.omp APPEND_SYSTEM.md agents tools extensions/herdr-watch.ts extensions/herdr-pr-ready.ts extensions/herdr-reload.ts
 
 if [ -n "$RESTORE" ]; then
   if [ -n "$WSL" ]; then
