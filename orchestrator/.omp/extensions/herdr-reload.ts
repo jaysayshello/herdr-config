@@ -88,6 +88,17 @@ export default function herdrReload(pi: ExtensionAPI) {
 		return child ? Number(child) : undefined;
 	}
 
+	// Herdr terminals often run without SHELL, so read the account's login shell.
+	async function loginShell(): Promise<string> {
+		if (process.env.SHELL) return process.env.SHELL;
+		const user = os.userInfo().username;
+		const shell =
+			process.platform === "darwin"
+				? (await pi.exec("dscl", [".", "-read", `/Users/${user}`, "UserShell"])).stdout.split(":")[1]
+				: (await pi.exec("getent", ["passwd", user])).stdout.trim().split(":")[6];
+		return shell?.trim() || "/bin/sh";
+	}
+
 	// The breadcrumb first; else the main session file omp holds open (subagent files sit one folder deeper).
 	async function sessionFile(t: Target, pid: number): Promise<string | undefined> {
 		const crumb = crumbFile(t.terminal, t.info.created_ms);
@@ -169,7 +180,7 @@ export default function herdrReload(pi: ExtensionAPI) {
 		// Its shell stays after omp, so the next /reload uses the path above.
 		if (!t.pane) return { target: t, ok: false, note: "skipped: no pane in herdr-app ls" };
 		const script = 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; cd "$2" && omp --resume "$3"; exec "$0" -li';
-		const shell = process.env.SHELL || os.userInfo().shell || "/bin/sh";
+		const shell = await loginShell();
 		const argv = [shell, "-lic", script, shell, String(pid), cwd, file];
 		const split = JSON.parse(
 			await run("herdr-app", ["do", "pane.split", "--direction", "right", "--pane", t.pane, "--argv", JSON.stringify(argv)]),
