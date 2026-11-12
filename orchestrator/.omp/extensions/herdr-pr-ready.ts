@@ -17,6 +17,10 @@ const STATE = path.join(os.homedir(), ".local/state/herdr-pr-ready/notified.json
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
   nodes { number title url isDraft headRefOid reviewDecision mergeable mergeStateStatus repository { nameWithOwner } } } } }`;
 const CLEAN: Record<string, true> = { CLEAN: true, HAS_HOOKS: true };
+// The sound of a ready notice. Herdr plays its own built-in "An agent finished" sound when a worker
+// ends a turn; this one must sound different. It obeys Herdr's sound switch (settings.json sounds.enabled).
+const SOUND = "/System/Library/Sounds/Glass.aiff";
+const HERDR_SETTINGS = path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config/herdr-app"), "settings.json");
 
 interface Pr {
 	number: number;
@@ -63,6 +67,11 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 			},
 			{ deliverAs: "aside", triggerTurn: true },
 		);
+		let soundsOn = true;
+		try {
+			soundsOn = JSON.parse(fs.readFileSync(HERDR_SETTINGS, "utf8")).sounds?.enabled !== false;
+		} catch {}
+		if (soundsOn && process.platform === "darwin" && fs.existsSync(SOUND)) void pi.exec("afplay", [SOUND]);
 	}
 
 	function schedule(ms: number) {
