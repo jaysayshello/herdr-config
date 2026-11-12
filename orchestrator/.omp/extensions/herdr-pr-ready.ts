@@ -1,7 +1,7 @@
 // Tells the orchestrator when one of your open pull requests becomes ready to merge: not a draft,
 // approved, no conflicts, and required checks passed (mergeStateStatus CLEAN or HAS_HOOKS). It sends
 // a <herdr-pr-ready> message, as herdr-watch.ts sends <herdr-report>, and the orchestrator writes a
-// report box. One GraphQL query through gh every 3 minutes; it only reads.
+// report box. One GraphQL query through gh each minute (EVERY_MS); it only reads.
 // Once per pull request and head commit: a push after the notice can notify again. The first poll
 // on a machine only records what is already ready, so it does not post a box for each of them.
 import * as fs from "node:fs";
@@ -9,8 +9,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-const EVERY_MS = 3 * 60_000;
+// The query costs 1 point of GitHub's 5,000 an hour, so a poll each minute uses about 60. The next
+// poll starts EVERY_MS after the last one ends, so two polls never overlap; GH_MS ends a hung gh.
+const EVERY_MS = 60_000;
 const FIRST_MS = 10_000;
+const GH_MS = 30_000;
 // Only the session in this space polls, so that other sessions started in this folder stay quiet.
 const SPACE = "orchestrator";
 const STATE = path.join(os.homedir(), ".local/state/herdr-pr-ready/notified.json");
@@ -36,10 +39,11 @@ interface Pr {
 
 export default function herdrPrReady(pi: ExtensionAPI) {
 	let timer: Timer | undefined;
+	let stop: AbortController | undefined;
 
-	async function poll() {
-		const r = await pi.exec("gh", ["api", "graphql", "-f", `query=${QUERY}`]);
-		if (r.code !== 0) return;
+	async function poll(signal: AbortSignal) {
+		const r = await pi.exec("gh", ["api", "graphql", "-f", `query=${QUERY}`], { signal: AbortSignal.any([signal, AbortSignal.timeout(GH_MS)]) });
+		if (r.code !== 0 || signal.aborted) return;
 		const open = (JSON.parse(r.stdout).data.viewer.pullRequests.nodes as Pr[]).filter(Boolean);
 		const ready = open.filter(
 			p => !p.isDraft && p.reviewDecision === "APPROVED" && p.mergeable === "MERGEABLE" && CLEAN[p.mergeStateStatus],
@@ -74,21 +78,24 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 		if (soundsOn && process.platform === "darwin" && fs.existsSync(SOUND)) void pi.exec("afplay", [SOUND]);
 	}
 
-	function schedule(ms: number) {
+	function schedule(ms: number, signal: AbortSignal) {
 		timer = setTimeout(async () => {
-			await poll().catch(() => {});
-			schedule(EVERY_MS);
+			await poll(signal).catch(() => {});
+			if (!signal.aborted) schedule(EVERY_MS, signal);
 		}, ms);
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		const self = process.env.HC_TERMINAL_ID;
-		if (timer || !self || ctx.agent.kind !== "main" || !ctx.hasUI) return;
+		if (stop || !self || ctx.agent.kind !== "main" || !ctx.hasUI) return;
+		const ctl = (stop = new AbortController());
 		const r = await pi.exec("hc", ["get", self, "--json"]);
 		const where: string | undefined = r.code === 0 ? JSON.parse(r.stdout).labels?.where : undefined;
-		if (where?.split(" / ")[0] === SPACE) schedule(FIRST_MS);
+		if (where?.split(" / ")[0] === SPACE && !ctl.signal.aborted) schedule(FIRST_MS, ctl.signal);
 	});
 	pi.on("session_shutdown", () => {
+		stop?.abort();
+		stop = undefined;
 		clearTimeout(timer);
 		timer = undefined;
 	});
