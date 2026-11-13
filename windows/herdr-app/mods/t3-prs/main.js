@@ -3,7 +3,8 @@
 // Keys (tmux-keys sends them while the sidebar lists show): `t3-prs.down` past the last space
 // takes the keyboard into this list, `t3-prs.up` from its first row gives it back to the pane.
 // In the list: Enter opens, Esc leaves. Right-click a row: copy it for Slack (the `slackpr` zsh
-// function), or close it (asks first; the confirm dialog sends `t3-prs.close`).
+// function), move it to Ready or to Draft (`gh pr ready`, `--undo`: only the draft state
+// changes), or close it (asks first; the confirm dialog sends `t3-prs.close`).
 // Approval: a green check after the number when the code owners of every changed file approved
 // (owners.js, against the base branch's CODEOWNERS and team members) and GitHub's review decision
 // agrees; amber when someone approved but that isn't enough yet. The tooltip says who or what.
@@ -100,6 +101,8 @@ export default class PullRequests extends View {
         if (c === "down") this.down();
         else if (c === "up") this.up();
         else if (c.startsWith("close:")) await this.close(c.slice(6), cx);
+        else if (c.startsWith("ready:")) await this.setDraft(c.slice(6), false, cx);
+        else if (c.startsWith("draft:")) await this.setDraft(c.slice(6), true, cx);
         cx.notify();
       }
     });
@@ -154,6 +157,17 @@ export default class PullRequests extends View {
     const r = await gh(["pr", "close", url]);
     if (r.code === 0) notify({ title: "Pull request closed", body: url, level: "success" });
     else notify({ title: "Could not close the pull request", body: (r.stderr || r.stdout).trim(), level: "error" });
+    await this.load(cx, true);
+  }
+
+  // A click, not part of the poll: one `gh pr ready` call, then a poll at once moves the row.
+  async setDraft(url, draft, cx) {
+    const p = (this.prs ?? []).find((q) => q.url === url);
+    const what = draft ? "Move to Draft" : "Move to Ready";
+    if (!p) return notify({ title: `${what} failed`, body: `Not in the list any more: ${url}`, level: "error" });
+    const r = await gh(["pr", "ready", String(p.number), "-R", p.fullRepo, ...(draft ? ["--undo"] : [])]);
+    if (r.code === 0) notify({ title: draft ? "Moved to Draft" : "Moved to Ready", body: `${p.repo} #${p.number}`, level: "success" });
+    else notify({ title: `${what} failed`, body: (r.stderr || r.stdout).trim() || `gh exited with ${r.code}`, level: "error" });
     await this.load(cx, true);
   }
 
@@ -312,7 +326,7 @@ export default class PullRequests extends View {
       .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
-        openOverlay({ mod: "t3-prs", kind: "popup", width: 220, height: 90, props: { menu: p } });
+        openOverlay({ mod: "t3-prs", kind: "popup", width: 220, height: 120, props: { menu: p } });
       })
       .child(this.mark(t, p.ci))
       .child(div().flex_none().text_color(on ? t.muted : t.dim).child(`#${p.number}`))
@@ -328,7 +342,7 @@ export default class PullRequests extends View {
       .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(p.repo));
   }
 
-  header(t, id, label, count, first, cx) {
+  header(t, id, label, count, first) {
     const open = !this.folded[id];
     return h_flex()
       .id(id)
@@ -340,7 +354,9 @@ export default class PullRequests extends View {
       .items_center()
       .text_size(11)
       .font_medium()
-      .on_click(() => {
+      // The cx from the click's own arguments: render()'s cx is no longer valid by the time
+      // anyone clicks, and using it throws before the redraw is asked for.
+      .on_click((_e, cx) => {
         this.folded[id] = open;
         localStorage.setItem("folded", JSON.stringify(this.folded));
         cx.notify();
@@ -369,6 +385,10 @@ export default class PullRequests extends View {
         if (r.code === 0) notify({ title: "Copied for Slack", body: text, level: "success" });
         else notify({ title: "Copy for Slack failed", body: (r.stderr || r.stdout).trim(), level: "error" });
       }))
+      // Only the move that applies; the main copy runs it, so its list polls again.
+      .child(p.draft
+        ? item("ready", "pr-ready", "Move to Ready", t.foreground, () => run(`t3-prs.ready:${p.url}`))
+        : item("draft", "pr-draft", "Move to Draft", t.foreground, () => run(`t3-prs.draft:${p.url}`)))
       .child(item("close", "pr-closed", "Close pull request…", t.ansi1, () => openOverlay({
         mod: "confirm", kind: "dialog", width: 420, height: 170,
         props: { title: "Close pull request?", detail: `${p.repo} #${p.number}: ${p.title}`, command: { name: `t3-prs.close:${p.url}` } },
@@ -384,7 +404,7 @@ export default class PullRequests extends View {
       { id: "draft", label: "Draft", members: prs.filter((p) => p.draft) },
     ].filter((g) => g.members.length);
     const rows = groups.flatMap((g, i) => [
-      this.header(t, g.id, g.label, g.members.length, i === 0, cx),
+      this.header(t, g.id, g.label, g.members.length, i === 0),
       ...(this.folded[g.id] ? [] : g.members.map((p) => this.row(t, p))),
     ]);
     const note = this.error ? `Could not load pull requests: ${this.error}`
