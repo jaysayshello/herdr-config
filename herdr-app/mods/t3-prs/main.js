@@ -385,7 +385,7 @@ export default class PullRequests extends View {
       .child(div().flex_none().text_size(12).text_color(t.dim).child(when));
   }
 
-  header(t, id, label, count, first, cx) {
+  header(t, id, label, count, first) {
     const open = !this.folded[id];
     return h_flex()
       .id(id)
@@ -397,7 +397,9 @@ export default class PullRequests extends View {
       .items_center()
       .text_size(11)
       .font_medium()
-      .on_click(() => {
+      // The cx from the click's own arguments: render()'s cx is no longer valid by the time
+      // anyone clicks, and using it throws before the redraw is asked for.
+      .on_click((_e, cx) => {
         this.fold(id);
         cx.notify();
       })
@@ -443,7 +445,7 @@ export default class PullRequests extends View {
       { id: "merged", label: "Merged", members: this.merged ?? [], row: (p) => this.mergedRow(t, p) },
     ].filter((g) => g.members.length);
     const rows = groups.flatMap((g, i) => [
-      this.header(t, g.id, g.label, g.members.length, i === 0, cx),
+      this.header(t, g.id, g.label, g.members.length, i === 0),
       ...(this.folded[g.id] ? [] : g.members.map(g.row)),
     ]);
     const note = this.error ? `Could not load pull requests: ${this.error}`

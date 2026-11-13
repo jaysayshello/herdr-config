@@ -342,7 +342,7 @@ export default class PullRequests extends View {
       .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(p.repo));
   }
 
-  header(t, id, label, count, first, cx) {
+  header(t, id, label, count, first) {
     const open = !this.folded[id];
     return h_flex()
       .id(id)
@@ -354,7 +354,9 @@ export default class PullRequests extends View {
       .items_center()
       .text_size(11)
       .font_medium()
-      .on_click(() => {
+      // The cx from the click's own arguments: render()'s cx is no longer valid by the time
+      // anyone clicks, and using it throws before the redraw is asked for.
+      .on_click((_e, cx) => {
         this.folded[id] = open;
         localStorage.setItem("folded", JSON.stringify(this.folded));
         cx.notify();
@@ -402,7 +404,7 @@ export default class PullRequests extends View {
       { id: "draft", label: "Draft", members: prs.filter((p) => p.draft) },
     ].filter((g) => g.members.length);
     const rows = groups.flatMap((g, i) => [
-      this.header(t, g.id, g.label, g.members.length, i === 0, cx),
+      this.header(t, g.id, g.label, g.members.length, i === 0),
       ...(this.folded[g.id] ? [] : g.members.map((p) => this.row(t, p))),
     ]);
     const note = this.error ? `Could not load pull requests: ${this.error}`
