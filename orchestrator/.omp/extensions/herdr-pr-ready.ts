@@ -6,6 +6,7 @@
 // Ready: once per pull request and head commit, so a push after the notice can notify again. The
 // first poll on a machine only records what is already ready, so it does not post a box for each.
 // Merged: once per pull request, and only for merges after the first poll of this session.
+// Each poll also goes out on the event bus as POLL_EVENT, for herdr-pr-autofix.ts.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,10 +20,11 @@ const GH_MS = 30_000;
 // Only the session in this space polls, so that other sessions started in this folder stay quiet.
 const SPACE = "orchestrator";
 const STATE = path.join(os.homedir(), ".local/state/herdr-pr-ready/notified.json");
+export const POLL_EVENT = "herdr-pr-ready:poll";
 // MERGED lists merged pull requests only, so one closed without a merge never shows. A merge bumps
 // updatedAt, so a new merge is at the top of the 20.
-const QUERY = `{ viewer { pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title url isDraft headRefOid reviewDecision mergeable mergeStateStatus repository { nameWithOwner } } }
+const QUERY = `{ viewer { login pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+  nodes { number title url isDraft headRefName headRefOid author { login } reviewDecision mergeable mergeStateStatus repository { nameWithOwner } } }
   merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
   nodes { number title url mergedAt repository { nameWithOwner } } } } }`;
 const CLEAN: Record<string, true> = { CLEAN: true, HAS_HOOKS: true };
@@ -43,12 +45,18 @@ interface Pr {
 	url: string;
 	repository: { nameWithOwner: string };
 }
-interface OpenPr extends Pr {
+export interface OpenPr extends Pr {
 	isDraft: boolean;
+	headRefName: string;
 	headRefOid: string;
+	author: { login: string } | null;
 	reviewDecision: string | null;
 	mergeable: string;
 	mergeStateStatus: string;
+}
+export interface Poll {
+	login: string;
+	open: OpenPr[];
 }
 interface MergedPr extends Pr {
 	mergedAt: string;
@@ -86,6 +94,7 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 		if (r.code !== 0 || signal.aborted) return;
 		const viewer = JSON.parse(r.stdout).data.viewer;
 		const open = (viewer.pullRequests.nodes as OpenPr[]).filter(Boolean);
+		pi.events.emit(POLL_EVENT, { login: viewer.login, open } satisfies Poll);
 		const ready = open.filter(
 			p => !p.isDraft && p.reviewDecision === "APPROVED" && p.mergeable === "MERGEABLE" && CLEAN[p.mergeStateStatus],
 		);
