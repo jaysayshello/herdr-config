@@ -1,4 +1,6 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { CustomToolAPI, CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
 interface LsTerminal {
@@ -12,7 +14,7 @@ interface LsTab {
 	name: string;
 	terminals: LsTerminal[];
 }
-interface LsSpace {
+export interface LsSpace {
 	id: string;
 	name: string;
 	folder?: string;
@@ -20,7 +22,7 @@ interface LsSpace {
 	active?: boolean;
 	tabs: LsTab[];
 }
-interface HcGet {
+export interface HcGet {
 	address?: string;
 	title?: string;
 	turn?: number;
@@ -68,9 +70,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return promise;
 }
 
-const factory: CustomToolFactory = (pi: CustomToolAPI) => {
+// The Herdr calls the tools below make. extensions/herdr-pr-autofix.ts uses them too, so that it
+// starts agents with the same code as herdr_new_agent.
+export function herdrClient(exec: CustomToolAPI["exec"]) {
 	async function run(cmd: string, args: string[], signal?: AbortSignal): Promise<string> {
-		const r = await pi.exec(cmd, args, { signal });
+		const r = await exec(cmd, args, { signal });
 		if (r.killed) throw new Error(`${cmd} was cancelled`);
 		if (r.code !== 0) throw new Error(r.stderr || r.stdout || `${cmd} exited with code ${r.code}`);
 		return r.stdout;
@@ -99,6 +103,59 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 		const hcId = (id: string) => (machine && id.startsWith(`${machine}/`) ? id.slice(machine.length + 1) : id);
 		return { spaces: local, selfSpace, machine, hcId };
 	}
+
+	// Splits the pane of terminal `beside` to the right and starts omp there with task as its first
+	// prompt, then waits up to 45 s for omp to take it.
+	async function newAgent(beside: string, task: string, signal?: AbortSignal) {
+		if (beside === self) throw new Error("Refusing to split the orchestrator's own pane");
+		const { spaces, hcId } = await view(signal);
+		let pane: string | undefined;
+		let space: string | undefined;
+		for (const s of spaces)
+			for (const t of s.tabs)
+				for (const term of t.terminals)
+					if (hcId(term.terminal) === beside) {
+						pane = term.pane;
+						space = s.id;
+					}
+		if (!pane) throw new Error(`Terminal ${beside} has no pane in herdr-app ls`);
+		// space.new starts its argv in a login shell, but pane.split runs it as is, with the PATH
+		// herdr-core started with, which lacks ~/.local/bin (where omp is) on a remote machine.
+		// The task goes through a file: a Mac security rule can kill `sh -lc` at once when a long
+		// argument follows it, and Herdr's core then puts a plain login shell in the new pane.
+		const file = path.join(os.tmpdir(), `herdr-task-${crypto.randomUUID()}`);
+		fs.writeFileSync(file, task, { mode: 0o600 });
+		const argv = ["sh", "-lc", 't=$(cat "$1") && rm -f "$1" && exec omp "$t"', "sh", file];
+		let split: { pane: string; terminal: string };
+		try {
+			split = await runJson(
+				"herdr-app",
+				["do", "pane.split", "--direction", "right", "--pane", pane, "--argv", JSON.stringify(argv)],
+				signal,
+			);
+		} catch (err) {
+			fs.rmSync(file, { force: true });
+			throw err;
+		}
+		const terminal = hcId(split.terminal);
+		let info: HcGet = {};
+		const deadline = Date.now() + 45_000;
+		for (;;) {
+			info = await get(terminal, signal).catch(() => ({}) as HcGet);
+			const state = info.status?.state;
+			if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) break;
+			if (Date.now() >= deadline)
+				throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
+			await sleep(500, signal);
+		}
+		return { space, pane: split.pane, terminal, turn: 0 };
+	}
+
+	return { run, runJson, ls, get, view, newAgent };
+}
+
+const factory: CustomToolFactory = (pi: CustomToolAPI) => {
+	const { run, runJson, ls, get, view, newAgent } = herdrClient(pi.exec);
 
 	// hc interrupt presses the stop key (Esc in omp). omp reports working until the abort is done,
 	// and a dialog that appears instead must not get the text, so wait for idle or done.
@@ -219,38 +276,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 				task: pi.zod.string(),
 			}),
 			async execute(_id, params, _onUpdate, _ctx, signal) {
-				if (params.beside === self) throw new Error("Refusing to split the orchestrator's own pane");
-				const { spaces, hcId } = await view(signal);
-				let pane: string | undefined;
-				let space: string | undefined;
-				for (const s of spaces)
-					for (const t of s.tabs)
-						for (const term of t.terminals)
-							if (hcId(term.terminal) === params.beside) {
-								pane = term.pane;
-								space = s.id;
-							}
-				if (!pane) throw new Error(`Terminal ${params.beside} has no pane in herdr-app ls`);
-				// space.new starts its argv in a login shell, but pane.split runs it as is, with the PATH
-				// herdr-core started with, which lacks ~/.local/bin (where omp is) on a remote machine.
-				const argv = ["sh", "-lc", 'exec omp "$@"', "sh", params.task];
-				const split = await runJson<{ pane: string; terminal: string }>(
-					"herdr-app",
-					["do", "pane.split", "--direction", "right", "--pane", pane, "--argv", JSON.stringify(argv)],
-					signal,
-				);
-				const terminal = hcId(split.terminal);
-				let info: HcGet = {};
-				const deadline = Date.now() + 45_000;
-				for (;;) {
-					info = await get(terminal, signal).catch(() => ({}) as HcGet);
-					const state = info.status?.state;
-					if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) break;
-					if (Date.now() >= deadline)
-						throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
-					await sleep(500, signal);
-				}
-				return result({ space, pane: split.pane, terminal, turn: 0 });
+				return result(await newAgent(params.beside, params.task, signal));
 			},
 		},
 		{

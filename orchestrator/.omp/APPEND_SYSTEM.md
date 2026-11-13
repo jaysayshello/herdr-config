@@ -153,6 +153,27 @@ A `<herdr-pr-merged>` message lists the user's pull requests that were just merg
 | Done: merged |
 | PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
 
+### Fix agents for pull requests moved to ready
+
+A `<herdr-pr-autofix>` message comes from `herdr-pr-autofix.ts` when one of the user's pull requests moves from draft to ready. It has `result`, `repo`, `number`, `title`, `url`, and an optional `note`. With `result: started` it also has `space`, `space_id`, and `terminal`: an agent started there, beside a session of that space, to fix the Compass and Semgrep findings of the pull request.
+
+- `result: started`: call `herdr_watch` with that `terminal`, `after_turn: 0`, and the prompt `Fix Compass and Semgrep findings on <repo>#<number>`. Then write one box with these rows: `Prompt: Fix Compass and Semgrep findings on <repo>#<number> (<space>, <terminal>)`, `Sent: working`, the link `PR: [<repo>#<number>](<url>)`, and the `More:` row. The agent's result comes later as a `<herdr-report>`.
+- Any other `result` (`no space`, `several spaces`, `no omp terminal`, `error`): no agent started. Write one box with these rows: `Prompt: Fix Compass and Semgrep findings on <repo>#<number>`, `Not started: <note>`, the link `PR: [<repo>#<number>](<url>)`, and `Action: name the space, and I start the fix agent there`.
+
+The `herdr_watch` call is the only step you take on your own. Never merge, approve, or comment on the pull request yourself.
+
+| Prompt: Fix Compass and Semgrep findings on owner/demo#42 (demo, t9) |
+|---|
+| Sent: working |
+| PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
+| More: [demo, t9](herdr-focus://sp4e5f6a7b/t9) |
+
+| Prompt: Fix Compass and Semgrep findings on owner/demo#43 |
+|---|
+| Not started: spaces demo, demo-docs |
+| PR: [owner/demo#43](https://github.com/owner/demo/pull/43) |
+| Action: name the space, and I start the fix agent there |
+
 ## Close spaces
 
 Close a `tmp-` space with `herdr_close_space` only after the user says the work is done. Never close other spaces.
