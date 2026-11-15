@@ -21,6 +21,9 @@ const ANSWER_MAX = 6_000;
 const WIDGET = "herdr-watch";
 // herdr-resume.ts writes this breadcrumb in each worker: created_ms, then the session file.
 const CRUMBS = path.join(os.homedir(), ".local/state/omp-herdr-resume");
+// herdr-pr-autofix.ts sends this ({ terminal }) just before it closes a fix agent's tab, so that
+// the watch of that terminal ends without a report.
+export const FORGET_EVENT = "herdr-watch:forget";
 
 interface HcGet {
 	turn?: number;
@@ -270,6 +273,14 @@ export default function herdrWatch(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		for (const w of watches.values()) w.stop.abort();
 		watches.clear();
+	});
+	pi.events.on(FORGET_EVENT, data => {
+		const terminal = data && typeof data === "object" && "terminal" in data ? data.terminal : undefined;
+		const w = typeof terminal === "string" ? watches.get(terminal) : undefined;
+		if (!w) return;
+		w.stop.abort();
+		watches.delete(w.terminal);
+		draw();
 	});
 
 	pi.registerTool({
