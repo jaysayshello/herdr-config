@@ -42,6 +42,12 @@ interface Created {
 	tab: string;
 	terminal: string;
 }
+// What the window shows (herdr-app status).
+interface Shown {
+	space?: string;
+	tab?: string;
+	focused_pane?: string;
+}
 
 const self = process.env.HC_TERMINAL_ID;
 // Goes before the text of an interrupting send: the stop can leave a repo half way through a step.
@@ -70,8 +76,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return promise;
 }
 
-// The Herdr calls the tools below make. extensions/herdr-pr-autofix.ts uses them too, so that it
-// starts agents with the same code as herdr_new_agent.
+// The Herdr calls the tools below make. extensions/herdr-pr-autofix.ts uses them too, to start its
+// fix agents in tabs (newTab, waitStarted) and to close those tabs (closeTab).
 export function herdrClient(exec: CustomToolAPI["exec"]) {
 	async function run(cmd: string, args: string[], signal?: AbortSignal): Promise<string> {
 		const r = await exec(cmd, args, { signal });
@@ -104,8 +110,21 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		return { spaces: local, selfSpace, machine, hcId };
 	}
 
+	// Waits up to 45 s for omp on a new terminal to take its first prompt.
+	async function waitStarted(terminal: string, signal?: AbortSignal) {
+		const deadline = Date.now() + 45_000;
+		for (;;) {
+			const info = await get(terminal, signal).catch(() => ({}) as HcGet);
+			const state = info.status?.state;
+			if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
+			if (Date.now() >= deadline)
+				throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
+			await sleep(500, signal);
+		}
+	}
+
 	// Splits the pane of terminal `beside` to the right and starts omp there with task as its first
-	// prompt, then waits up to 45 s for omp to take it.
+	// prompt, then waits for omp to take it.
 	async function newAgent(beside: string, task: string, signal?: AbortSignal) {
 		if (beside === self) throw new Error("Refusing to split the orchestrator's own pane");
 		const { spaces, hcId } = await view(signal);
@@ -138,20 +157,44 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 			throw err;
 		}
 		const terminal = hcId(split.terminal);
-		let info: HcGet = {};
-		const deadline = Date.now() + 45_000;
-		for (;;) {
-			info = await get(terminal, signal).catch(() => ({}) as HcGet);
-			const state = info.status?.state;
-			if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) break;
-			if (Date.now() >= deadline)
-				throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
-			await sleep(500, signal);
-		}
+		await waitStarted(terminal, signal);
 		return { space, pane: split.pane, terminal, turn: 0 };
 	}
 
-	return { run, runJson, ls, get, view, newAgent };
+	// Starts omp in folder with task as its first prompt, in a new tab named tabName of the space
+	// named spaceName, which it makes if it is missing. Herdr shows a new space or tab at once, so
+	// this shows again the space, tab and pane that were shown before. It does not wait for omp.
+	async function newTab(spaceName: string, tabName: string, folder: string, task: string, signal?: AbortSignal) {
+		const [{ spaces, machine, hcId }, shown] = await Promise.all([view(signal), runJson<Shown>("herdr-app", ["status"], signal)]);
+		const space = spaces.find(s => s.name === spaceName);
+		const agent = ["--folder", folder, "--argv", '["omp"]', "--task", task];
+		const created = await runJson<Created>(
+			"herdr-app",
+			space
+				? ["do", "tab.new", "--space", space.id, "--name", tabName, ...agent]
+				: ["do", "space.new", "--name", spaceName, "--tab", tabName, ...agent, ...(machine ? ["--machine", machine] : [])],
+			signal,
+		);
+		// A failed step back (the user closed that space meanwhile) must not fail the start.
+		if (shown.space) await run("herdr-app", ["do", "space.select", "--id", shown.space], signal).catch(() => {});
+		if (shown.tab) await run("herdr-app", ["do", "tab.select", "--id", shown.tab], signal).catch(() => {});
+		if (shown.focused_pane) await run("herdr-app", ["do", "pane.focus", "--pane", shown.focused_pane], signal).catch(() => {});
+		return { space: created.space, tab: created.tab, terminal: hcId(created.terminal) };
+	}
+
+	// Closes tab `tab` of space `space` (herdr-app ls ids) and ends its terminals, but only if it
+	// still holds terminal `terminal`. Returns false if that tab is gone.
+	async function closeTab(space: string, tab: string, terminal: string, signal?: AbortSignal) {
+		const { spaces, hcId } = await view(signal);
+		const found = spaces
+			.find(s => s.id === space)
+			?.tabs.find(t => t.id === tab && t.terminals.some(term => hcId(term.terminal) === terminal));
+		if (!found) return false;
+		await run("herdr-app", ["do", "tab.close", "--id", tab, "--confirmed", "true"], signal);
+		return true;
+	}
+
+	return { run, runJson, ls, get, view, waitStarted, newAgent, newTab, closeTab };
 }
 
 const factory: CustomToolFactory = (pi: CustomToolAPI) => {

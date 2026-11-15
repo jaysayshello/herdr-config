@@ -57,8 +57,10 @@ export interface OpenPr extends Pr {
 export interface Poll {
 	login: string;
 	open: OpenPr[];
+	// The 20 merged pull requests updated last.
+	merged: MergedPr[];
 }
-interface MergedPr extends Pr {
+export interface MergedPr extends Pr {
 	mergedAt: string;
 }
 
@@ -94,14 +96,13 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 		if (r.code !== 0 || signal.aborted) return;
 		const viewer = JSON.parse(r.stdout).data.viewer;
 		const open = (viewer.pullRequests.nodes as OpenPr[]).filter(Boolean);
-		pi.events.emit(POLL_EVENT, { login: viewer.login, open } satisfies Poll);
+		const lastMerged = (viewer.merged.nodes as MergedPr[]).filter(Boolean);
+		pi.events.emit(POLL_EVENT, { login: viewer.login, open, merged: lastMerged } satisfies Poll);
 		const ready = open.filter(
 			p => !p.isDraft && p.reviewDecision === "APPROVED" && p.mergeable === "MERGEABLE" && CLEAN[p.mergeStateStatus],
 		);
 		const after = (since ??= started);
-		const newMerges = (viewer.merged.nodes as MergedPr[])
-			.filter(Boolean)
-			.filter(p => Date.parse(p.mergedAt) > after && !merged.has(p.url));
+		const newMerges = lastMerged.filter(p => Date.parse(p.mergedAt) > after && !merged.has(p.url));
 		for (const p of newMerges) merged.add(p.url);
 		// url -> the head commit it was ready at. Closed pull requests drop out.
 		const first = !fs.existsSync(STATE);
