@@ -4,7 +4,11 @@
 // takes the keyboard into this list, `t3-prs.up` from its first row gives it back to the pane.
 // In the list: Enter opens, Esc leaves. Right-click an open row: copy it for Slack (the `slackpr`
 // zsh function), move it to Ready or to Draft (`gh pr ready`, `--undo`: only the draft state
-// changes), or close it (asks first; the confirm dialog sends `t3-prs.close`).
+// changes), merge it when it is ready (asks first), or close it (asks first; the confirm dialog
+// sends `t3-prs.close`).
+// Merge shows only on the conditions of the orchestrator's PR-ready notice: not a draft, approved,
+// mergeable, and mergeStateStatus CLEAN or HAS_HOOKS. It uses the first method the repo permits
+// (squash, merge commit, rebase), with --match-head-commit, so a push after the poll stops it.
 // Approval: a green check after the number when the code owners of every changed file approved
 // (owners.js, against the base branch's CODEOWNERS and team members) and GitHub's review decision
 // agrees; amber when someone approved but that isn't enough yet. The tooltip says who or what.
@@ -25,7 +29,7 @@ import { fetchComments, summarize } from "./comments.js";
 
 const EVERY = 5000;
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title isDraft url headRefOid baseRefName reviewDecision updatedAt author { login } repository { name nameWithOwner }
+  nodes { number title isDraft url headRefOid baseRefName reviewDecision mergeable mergeStateStatus updatedAt author { login } repository { name nameWithOwner }
     latestReviews(first: 20) { nodes { state author { login } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
   merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -44,6 +48,12 @@ async function gql(query, vars = {}) {
 const CI = { SUCCESS: "passed", FAILURE: "failed", ERROR: "failed", PENDING: "running", EXPECTED: "running" };
 // The frame of a pull request that is ready to merge.
 const READY = "#4ade80";
+
+// The orchestrator's PR-ready conditions (herdr-pr-ready.ts): required checks passed, no conflicts.
+const MERGE_STATES = { CLEAN: true, HAS_HOOKS: true };
+const mergeReady = (p) => !p.draft && p.decision === "APPROVED" && p.mergeable === "MERGEABLE" && MERGE_STATES[p.mergeState] === true;
+// Merge methods in the order to use them, as `gh repo view --json` names them and `gh pr merge` takes them.
+const METHODS = [["squashMergeAllowed", "squash", "Squash merge"], ["mergeCommitAllowed", "merge", "Merge commit"], ["rebaseMergeAllowed", "rebase", "Rebase merge"]];
 
 // Mods have no Intl, and Date only knows the computer's own zone: work out US Eastern by hand.
 // Daylight time runs from the second Sunday of March, 2 AM (07:00 UTC), to the first Sunday of
@@ -78,6 +88,8 @@ export default class PullRequests extends View {
     this.folded = JSON.parse(localStorage.getItem("folded") ?? "{}");
     // url -> { key, result } of the last code owner check (see checkApprovals).
     this.approvals = new Map();
+    // repo -> { flag, label } of its merge method (see mergeMethod), for as long as this copy runs.
+    this.methods = new Map();
     // url -> { key, list } of people's comments (see checkComments); url -> ISO time of the last open.
     this.comments = new Map();
     this.seen = JSON.parse(localStorage.getItem("seen") ?? "{}");
@@ -100,6 +112,11 @@ export default class PullRequests extends View {
         else if (c.startsWith("close:")) await this.close(c.slice(6), cx);
         else if (c.startsWith("ready:")) await this.setDraft(c.slice(6), false, cx);
         else if (c.startsWith("draft:")) await this.setDraft(c.slice(6), true, cx);
+        else if (c.startsWith("ask-merge:")) await this.askMerge(c.slice(10));
+        else if (c.startsWith("merge:")) {
+          const [head, ...url] = c.slice(6).split(":");
+          await this.merge(head, url.join(":"), cx);
+        }
         else if (c.startsWith("fold:")) this.fold(c.slice(5));
         cx.notify();
       }
@@ -178,6 +195,58 @@ export default class PullRequests extends View {
     await this.load(cx, true);
   }
 
+  // The first merge method the repo permits, read once per repo.
+  async mergeMethod(repo) {
+    if (!this.methods.has(repo)) {
+      const r = await exec("gh", ["repo", "view", repo, "--json", METHODS.map((m) => m[0]).join(",")]);
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh exited with ${r.code}`);
+      const allowed = JSON.parse(r.stdout);
+      const m = METHODS.find(([key]) => allowed[key]);
+      if (!m) throw new Error(`${repo} permits no merge method`);
+      this.methods.set(repo, { flag: m[1], label: m[2] });
+    }
+    return this.methods.get(repo);
+  }
+
+  // Merge is a click on a ready row; the dialog names the method and the head commit it merges.
+  async askMerge(url) {
+    const p = (this.prs ?? []).find((q) => q.url === url);
+    if (!p || !mergeReady(p)) return notify({ title: "Merge stopped", body: `Not ready to merge any more: ${url}`, level: "error" });
+    let method;
+    try {
+      method = await this.mergeMethod(p.fullRepo);
+    } catch (e) {
+      return notify({ title: "Merge failed", body: String(e.message ?? e), level: "error" });
+    }
+    openOverlay({
+      mod: "confirm", kind: "dialog", width: 460, height: 190,
+      props: {
+        title: `Merge ${p.fullRepo}#${p.number}: ${p.title}?`,
+        detail: `${method.label} into ${p.base}, at commit ${p.head.slice(0, 7)}. A push after this stops the merge.`,
+        command: { name: `t3-prs.merge:${p.head}:${p.url}` },
+      },
+    });
+  }
+
+  // The confirmed merge. `head` is the commit the dialog named: gh refuses when the branch moved.
+  async merge(head, url, cx) {
+    const p = (this.prs ?? []).find((q) => q.url === url);
+    const name = p ? `${p.fullRepo}#${p.number}` : url;
+    let body = null;
+    if (!p || !mergeReady(p)) body = `Not ready to merge any more: ${name}`;
+    else if (p.head !== head) body = `New commits on ${name} since the confirmation; open the menu again`;
+    if (body) return notify({ title: "Merge stopped", body, level: "error" });
+    try {
+      const method = await this.mergeMethod(p.fullRepo);
+      const r = await exec("gh", ["pr", "merge", String(p.number), "-R", p.fullRepo, `--${method.flag}`, "--match-head-commit", head]);
+      if (r.code === 0) notify({ title: "Merged", body: name, level: "success" });
+      else notify({ title: "Merge failed", body: (r.stderr || r.stdout).trim() || `gh exited with ${r.code}`, level: "error" });
+    } catch (e) {
+      notify({ title: "Merge failed", body: String(e.message ?? e), level: "error" });
+    }
+    await this.load(cx, true);
+  }
+
   // A poll redraws only when something changed, so the CI spinners keep turning undisturbed.
   // Only a click on refresh turns the refresh icon.
   async load(cx, manual = false) {
@@ -207,6 +276,8 @@ export default class PullRequests extends View {
         updated: p.updatedAt,
         author: p.author?.login ?? "",
         decision: p.reviewDecision,
+        mergeable: p.mergeable,
+        mergeState: p.mergeStateStatus,
         reviews: p.latestReviews.nodes.filter((v) => v.author).map((v) => ({ login: v.author.login, state: v.state })),
         ci: CI[p.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? null,
       }));
@@ -342,7 +413,7 @@ export default class PullRequests extends View {
       .on_click((_e, cx) => { this.open(p.url); cx.notify(); })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
-        openOverlay({ mod: "t3-prs", kind: "popup", width: 220, height: 120, props: { menu: p } });
+        openOverlay({ mod: "t3-prs", kind: "popup", width: 220, height: mergeReady(p) ? 150 : 120, props: { menu: p } });
       })
       .child(this.mark(t, p.ci))
       .child(div().flex_none().text_color(on ? t.muted : t.dim).child(`#${p.number}`))
@@ -429,6 +500,8 @@ export default class PullRequests extends View {
       .child(p.draft
         ? item("ready", "pr-ready", "Move to Ready", t.foreground, () => run(`t3-prs.ready:${p.url}`))
         : item("draft", "pr-draft", "Move to Draft", t.foreground, () => run(`t3-prs.draft:${p.url}`)))
+      // The main copy reads the merge method and asks to confirm.
+      .when(mergeReady(p), (el) => el.child(item("merge", "pr-merged", "Merge…", t.foreground, () => run(`t3-prs.ask-merge:${p.url}`))))
       .child(item("close", "pr-closed", "Close pull request…", t.ansi1, () => openOverlay({
         mod: "confirm", kind: "dialog", width: 420, height: 170,
         props: { title: "Close pull request?", detail: `${p.repo} #${p.number}: ${p.title}`, command: { name: `t3-prs.close:${p.url}` } },
