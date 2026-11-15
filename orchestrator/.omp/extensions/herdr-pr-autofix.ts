@@ -1,16 +1,17 @@
 // When one of your pull requests moves from draft to ready, this starts an omp agent in its own tab
-// of the Herdr space SPACE, to fix its Compass and Semgrep findings. The tab is named for the pull
-// request (`demo#42`), and omp runs in the folder of the pull request's project, so the space you
-// work in keeps its layout. It reads the polls of herdr-pr-ready.ts from the event bus, so it makes
-// no GitHub query of its own. A move on GitHub and the Move to Ready menu of the Pull requests
-// panel both show in the next poll.
-// Guards: one agent per pull request and head commit (STATE); a session's first poll only records
-// the drafts, unless DRAFTS has those of a poll in the last DRAFTS_MS, so a move to ready during a
-// /reload still starts an agent; only pull requests whose author is the gh user.
-// The folder is that of an omp terminal whose folder has the pull request's link in a tracking file
-// (TRACKING), or is a clone of its repo on its branch. Terminals in SPACE and in the orchestrator's
-// folder do not count. With no such space or several, nothing starts. Either way the orchestrator
-// gets a <herdr-pr-autofix> message.
+// of the Herdr space SPACE, to fix its Compass and Semgrep findings until none are left. Each pull
+// request gets its own tab, named for it (`demo#42`), so 4 moves in one poll give 4 agents that
+// run at once, and the space you work in keeps its layout. It reads the polls of herdr-pr-ready.ts
+// from the event bus, so it makes no GitHub query of its own. A move on GitHub and the Move to
+// Ready menu of the Pull requests panel both show in the next poll.
+// Guards: one agent per pull request and head commit (STATE), and none while the pull request's
+// tab is still open, so a push by the agent never starts a second one; a session's first poll
+// only records the drafts, unless DRAFTS has those of a poll in the last DRAFTS_MS, so a move to
+// ready during a /reload still starts an agent; only pull requests whose author is the gh user.
+// The folder, first match wins: an omp terminal's folder that has the pull request's link in a
+// tracking file (TRACKING) or is a clone of its repo on its branch (terminals in SPACE and in the
+// orchestrator's folder do not count); a local clone (cloneDirs); a new clone in CLONES. The
+// orchestrator gets a <herdr-pr-autofix> message with the folder.
 // A tab closes, with a <herdr-pr-autofix-closed> message, when its agent is done (done or idle at
 // two polls in a row, at the same turn) or when the pull request is merged or closed, even if the
 // agent still runs. A blocked agent or one with an error keeps its tab. STATE keeps each tab, so
@@ -34,13 +35,27 @@ const DRAFTS = path.join(os.homedir(), ".local/state/herdr-pr-autofix/drafts.jso
 const DRAFTS_MS = 10 * 60_000;
 // Each project folder logs its pull requests in these files.
 const TRACKING = ["MERGED-PRS.md", "TODO.md", "README.md"];
+// Where local clones live, first match wins.
+const cloneDirs = (owner: string, repo: string) => [
+	path.join(os.homedir(), "Github", owner, repo),
+	path.join(os.homedir(), "src", owner, repo),
+	path.join(os.homedir(), "src", repo),
+];
+// New clones, one folder per pull request, for a repo with no local clone.
+const CLONES = "/tmp/herdr-pr-autofix";
+const CLONE_MS = 10 * 60_000;
+// The safety stop of an agent: at most MAX_ROUNDS pushes of fixes, and a stop when one finding
+// comes back after MAX_REPEATS fixes, because the fixes then chase each other.
+const MAX_ROUNDS = 10;
+const MAX_REPEATS = 2;
 
 interface Outcome {
-	result: "started" | "no space" | "several spaces" | "error";
+	result: "started" | "error";
 	spaceId?: string;
 	tab?: string;
 	tabId?: string;
 	terminal?: string;
+	folder?: string;
 	note?: string;
 }
 // One record per pull request and head commit an agent started at. tabId and terminal are set
@@ -57,24 +72,28 @@ interface Agent {
 	terminal?: string;
 }
 type Reason = "done" | "merged" | "closed";
-// A folder of the pull request; clone is set when the folder is a clone on its branch.
-interface Match {
+// The folder an agent starts in, how it was found, and a clone of the repo if one is known.
+interface Where {
+	folder: string;
+	how: string;
 	clone?: string;
 }
 
-function task(p: OpenPr, clone: string | undefined): string {
+function task(p: OpenPr, w: Where): string {
 	const repo = p.repository.nameWithOwner;
+	const here = w.clone === w.folder ? "This folder is one" : w.clone ? `There is one at ${w.clone}` : "This folder is the project folder, not a clone";
 	return [
-		`Fix the Compass and Semgrep findings on ${p.url} (${repo}#${p.number}, branch ${p.headRefName}). It just moved from draft to ready at head commit ${p.headRefOid.slice(0, 7)}.`,
+		`Fix the Compass and Semgrep findings on ${p.url} (${repo}#${p.number}, branch ${p.headRefName}). It just moved from draft to ready at head commit ${p.headRefOid.slice(0, 7)}. Keep going until Compass and Semgrep have no findings on the head commit.`,
 		"",
-		"1. Read skill://fix and follow it.",
-		`2. Work in a local clone of ${repo} on branch ${p.headRefName}${clone ? ` (there is one at ${clone})` : ""}. If that clone has uncommitted changes or another branch checked out, do not change it: clone the repo again into a temporary folder and work there.`,
-		"3. Wait for the Compass check to start and finish on the head commit, as the fix skill's Phase 4b loop does. Then fix every Compass finding with the fix skill.",
-		"4. If the Compass job is skipped on the head commit, this repo starts Compass only after a pull request comment that asks for it. Then stop at once and reply with the one line `Compass needs a comment`. Do not post that comment.",
-		"5. Also fix the Semgrep findings: the failures of the `semgrep-cloud-platform/scan` check and the Semgrep review comments. Use the same rules as for Compass: real fixes only, a guard test for each fix, the ledger, no replies to bot comments, `git push --force-with-lease`, and resolve each fixed thread.",
-		"6. Stop after 3 rounds, even if findings are left, and say what is left.",
-		"7. Do not merge or approve the pull request, and do not move it back to draft.",
-		"8. This tab closes about 2 minutes after you stop. If you need an answer from the user, ask with the ask tool, so that the tab stays open until the user answers.",
+		"1. Read skill://fix and follow it, with the changes below. Where they differ, these steps win. The only pull request comments you post are the two in steps 3 and 7.",
+		`2. Work in a clone of ${repo} on branch ${p.headRefName}. ${here}. If that clone has uncommitted changes or another branch checked out, do not change it: clone the repo again into a new folder under ${CLONES} and work there.`,
+		"3. Compass: its review is the check whose name starts with `Compass Code Review` and the `ws-compass[bot]` review on the head commit. The jobs of the `Compass` workflow (`Run / Compass`, `Run / Apply Changes`, and the others) are its chat mode: ignore them, also when they are skipped. Never write `@ws-compass` in a comment, because that starts the chat mode, which can push commits. If the head commit has no `Compass Code Review` check and no Compass review 5 minutes after it was pushed (or now, if it is older), post one general pull request comment whose whole body is `/compass-review`. Post it at most once per head commit. If no Compass review of the head commit comes 30 minutes after that comment, stop and say so.",
+		"4. Semgrep: the `semgrep-cloud-platform/scan` check and the Semgrep review comments on the head commit. Fix them with the same rules as Compass: real fixes only, a guard test for each fix, the ledger, no replies to bot comments, `git push --force-with-lease`, and resolve each fixed thread.",
+		"5. The loop: after each push, wait for the Compass review and the Semgrep result of the new head commit, then fix what they find. Stop when both have no findings on the head commit, or when only findings you cannot fix are left. Wait inside your turn, with a bash loop (a background job is fine), and do not end your turn while you wait: this tab closes about 2 minutes after you stop.",
+		`6. Safety stop: stop after ${MAX_ROUNDS} rounds (one round is one push of fixes), even if findings are left. Also stop when a finding comes back after you fixed it ${MAX_REPEATS} times.`,
+		"7. A finding you cannot fix (it is wrong, out of scope, or needs the user), and every finding left at a safety stop: do not ask the user, and do not reply in its thread. When you stop, post one general pull request comment: the first line `🤖 Not fixed:`, then one line for each such finding, `- <file>:<line> <the finding in a few words>: <why, in 15 words or fewer>`. After a safety stop, add the line `- Stopped: <the reason>`. Post no such comment when you fixed every finding.",
+		"8. Do not merge or approve the pull request, and do not move it back to draft.",
+		"9. Your final reply: the rounds, the findings you fixed, the findings left, and the comments you posted.",
 	].join("\n");
 }
 
@@ -101,6 +120,10 @@ function write(file: string, data: unknown) {
 	fs.renameSync(`${file}.tmp`, file);
 }
 
+function message(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
 export default function herdrPrAutofix(pi: ExtensionAPI) {
 	if (!ENABLED) return;
 	const herdr = herdrClient(pi.exec);
@@ -110,8 +133,18 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 	const doneAt = new Map<string, number>();
 	let queue = Promise.resolve();
 
+	async function isClone(dir: string, repo: string): Promise<boolean> {
+		const remotes = await pi.exec("git", ["-C", dir, "remote", "-v"]);
+		return (
+			remotes.code === 0 &&
+			remotes.stdout
+				.split("\n")
+				.some(l => l.toLowerCase().match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s/)?.[1] === repo.toLowerCase())
+		);
+	}
+
 	// The pull request's link in a tracking file, or a clone of its repo on its branch (returned).
-	async function belongs(cwd: string, p: OpenPr): Promise<Match | undefined> {
+	async function belongs(cwd: string, p: OpenPr): Promise<{ clone?: string } | undefined> {
 		const escaped = p.url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		const link = new RegExp(`${escaped}(?![0-9])`);
 		for (const f of TRACKING) {
@@ -119,18 +152,13 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 				if (link.test(fs.readFileSync(path.join(cwd, f), "utf8"))) return {};
 			} catch {}
 		}
-		const remotes = await pi.exec("git", ["-C", cwd, "remote", "-v"]);
-		if (remotes.code !== 0) return undefined;
-		const repo = p.repository.nameWithOwner.toLowerCase();
-		const ofRepo = remotes.stdout
-			.split("\n")
-			.some(l => l.toLowerCase().match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s/)?.[1] === repo);
-		if (!ofRepo) return undefined;
+		if (!(await isClone(cwd, p.repository.nameWithOwner))) return undefined;
 		const branch = await pi.exec("git", ["-C", cwd, "branch", "--show-current"]);
 		return branch.code === 0 && branch.stdout.trim() === p.headRefName ? { clone: cwd } : undefined;
 	}
 
-	async function start(p: OpenPr): Promise<Outcome> {
+	// The omp terminals outside SPACE and the orchestrator's folder, and the ids of the open tabs.
+	async function scan() {
 		const { spaces, hcId } = await herdr.view();
 		// An agent in the orchestrator's folder would load the orchestrator's own rules.
 		const own = process.cwd();
@@ -148,29 +176,83 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 					),
 				),
 		);
-		const checks = new Map<string, Promise<Match | undefined>>();
+		return { omp, tabs: new Set(spaces.flatMap(s => s.tabs.map(t => t.id))) };
+	}
+
+	async function locate(p: OpenPr, omp: { space: string; cwd: string }[]): Promise<Where> {
+		const repo = p.repository.nameWithOwner;
+		const checks = new Map<string, Promise<{ clone?: string } | undefined>>();
 		const hits: { space: string; cwd: string; clone?: string }[] = [];
 		for (const t of omp) {
 			if (!checks.has(t.cwd)) checks.set(t.cwd, belongs(t.cwd, p));
 			const hit = await checks.get(t.cwd);
 			if (hit) hits.push({ ...t, ...hit });
 		}
-		const matched = [...new Set(hits.map(h => h.space))];
-		if (matched.length === 0)
-			return { result: "no space", note: "no omp session sits in a folder that logs this pull request or in a clone on its branch" };
-		if (matched.length > 1) return { result: "several spaces", note: `spaces ${matched.join(", ")}` };
-		// The project folder, where the tracking files are, before a clone.
-		const folder = (hits.find(h => !h.clone) ?? hits[0]).cwd;
-		const clone = hits.find(h => h.clone)?.clone;
-		const tab = `${p.repository.nameWithOwner.split("/")[1]}#${p.number}`;
-		const t = await herdr.newTab(SPACE, tab, folder, task(p, clone));
-		const at = { spaceId: t.space, tab, tabId: t.tab, terminal: t.terminal };
-		try {
-			await herdr.waitStarted(t.terminal);
-		} catch (err) {
-			return { result: "error", ...at, note: err instanceof Error ? err.message : String(err) };
+		if (hits.length > 0) {
+			// A project folder, where the tracking files are, before a clone; then by space name.
+			const pick = hits.sort((a, b) => Number(!!a.clone) - Number(!!b.clone) || a.space.localeCompare(b.space))[0];
+			const spaces = [...new Set(hits.map(h => h.space))];
+			const of = spaces.length > 1 ? `, one of spaces ${spaces.join(", ")}` : "";
+			return { folder: pick.cwd, clone: hits.find(h => h.clone)?.clone, how: `project space ${pick.space}${of}` };
 		}
-		return { result: "started", ...at, note: `project space ${matched[0]}, folder ${folder}` };
+		const [owner, name] = repo.split("/");
+		for (const dir of cloneDirs(owner, name)) if (await isClone(dir, repo)) return { folder: dir, clone: dir, how: "local clone" };
+		const dir = path.join(CLONES, `${owner}-${name}-${p.number}`);
+		if (!(await isClone(dir, repo))) {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.mkdirSync(CLONES, { recursive: true });
+			// Blobless, so that a big repo clones fast; git gets the file contents it needs later.
+			const args = ["repo", "clone", repo, dir, "--", "--filter=blob:none", "--branch", p.headRefName];
+			const r = await pi.exec("gh", args, { signal: AbortSignal.timeout(CLONE_MS) });
+			if (r.killed || r.code !== 0) throw new Error(`gh repo clone ${repo} failed: ${(r.stderr || r.stdout).trim() || `code ${r.code}`}`);
+		}
+		return { folder: dir, clone: dir, how: `new clone in ${CLONES}` };
+	}
+
+	// Starts one agent per pull request and records it in agents. The folders and the waits for omp
+	// run at once; the tabs open one at a time, because the first one makes SPACE and each one puts
+	// back the view that was shown.
+	async function startAll(prs: OpenPr[], agents: Agent[]) {
+		const runs: { p: OpenPr; o: Outcome }[] = [];
+		try {
+			const { omp, tabs } = await scan();
+			// A push by the agent, then a move to draft and back, must not start a second agent.
+			const todo = prs.filter(p => !agents.some(a => a.url === p.url && a.tabId && tabs.has(a.tabId)));
+			const placed = await Promise.all(
+				todo.map(p => locate(p, omp).then(w => ({ p, w }), (err: unknown) => ({ p, err }))),
+			);
+			for (const x of placed) {
+				if (!("w" in x)) {
+					runs.push({ p: x.p, o: { result: "error", note: message(x.err) } });
+					continue;
+				}
+				const { p, w } = x;
+				const tab = `${p.repository.nameWithOwner.split("/")[1]}#${p.number}`;
+				try {
+					const t = await herdr.newTab(SPACE, tab, w.folder, task(p, w));
+					runs.push({ p, o: { result: "started", spaceId: t.space, tab, tabId: t.tab, terminal: t.terminal, folder: w.folder, note: w.how } });
+				} catch (err) {
+					runs.push({ p, o: { result: "error", folder: w.folder, note: message(err) } });
+				}
+			}
+		} catch (err) {
+			for (const p of prs) runs.push({ p, o: { result: "error", note: message(err) } });
+		}
+		await Promise.all(
+			runs.map(async r => {
+				if (!r.o.terminal) return;
+				try {
+					await herdr.waitStarted(r.o.terminal);
+				} catch (err) {
+					r.o = { ...r.o, result: "error", note: message(err) };
+				}
+			}),
+		);
+		for (const { p, o } of runs) {
+			const { spaceId, tab, tabId, terminal } = o;
+			agents.push({ url: p.url, repo: p.repository.nameWithOwner, number: p.number, title: p.title, head: p.headRefOid, spaceId, tab, tabId, terminal });
+			tell(p, o);
+		}
 	}
 
 	function send(type: string, lines: string[]) {
@@ -188,6 +270,7 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 			`title: ${p.title}`,
 			`url: ${p.url}`,
 			...(o.tabId ? [`space: ${SPACE}`, `space_id: ${o.spaceId}`, `tab: ${o.tab}`, `terminal: ${o.terminal}`] : []),
+			...(o.folder ? [`folder: ${o.folder}`] : []),
 			...(o.note ? [`note: ${o.note}`] : []),
 		]);
 	}
@@ -259,17 +342,8 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 		const moved = before
 			? poll.open.filter(p => before.has(p.url) && !p.isDraft && p.author?.login === poll.login)
 			: [];
-		for (const p of moved) {
-			if (agents.some(a => a.url === p.url && a.head === p.headRefOid)) continue;
-			const o = await start(p).catch((err): Outcome => ({ result: "error", note: err instanceof Error ? err.message : String(err) }));
-			// A pull request with no space is not recorded, so a move back to draft and to ready
-			// again tries again.
-			if (o.result === "started" || o.result === "error") {
-				const { spaceId, tab, tabId, terminal } = o;
-				agents.push({ url: p.url, repo: p.repository.nameWithOwner, number: p.number, title: p.title, head: p.headRefOid, spaceId, tab, tabId, terminal });
-			}
-			tell(p, o);
-		}
+		const fresh = moved.filter(p => !agents.some(a => a.url === p.url && a.head === p.headRefOid));
+		if (fresh.length > 0) await startAll(fresh, agents);
 		if (JSON.stringify(agents) !== JSON.stringify(saved)) write(STATE, agents);
 		// Last, so that a restart during a start finds the move again.
 		write(DRAFTS, { at: Date.now(), urls: [...now] });
