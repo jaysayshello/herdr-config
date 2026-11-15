@@ -4,8 +4,9 @@
 // work in keeps its layout. It reads the polls of herdr-pr-ready.ts from the event bus, so it makes
 // no GitHub query of its own. A move on GitHub and the Move to Ready menu of the Pull requests
 // panel both show in the next poll.
-// Guards: one agent per pull request and head commit (STATE); the first poll of a session only
-// records the drafts; only pull requests whose author is the gh user.
+// Guards: one agent per pull request and head commit (STATE); a session's first poll only records
+// the drafts, unless DRAFTS has those of a poll in the last DRAFTS_MS, so a move to ready during a
+// /reload still starts an agent; only pull requests whose author is the gh user.
 // The folder is that of an omp terminal whose folder has the pull request's link in a tracking file
 // (TRACKING), or is a clone of its repo on its branch. Terminals in SPACE and in the orchestrator's
 // folder do not count. With no such space or several, nothing starts. Either way the orchestrator
@@ -27,6 +28,10 @@ const ENABLED = true;
 // No tmp- prefix, so that the orchestrator does not close it as a temporary space.
 const SPACE = "reviewers";
 const STATE = path.join(os.homedir(), ".local/state/herdr-pr-autofix/agents.json");
+// The drafts at the last poll of any session. Older than DRAFTS_MS, they no longer count: a move
+// to ready while the orchestrator was off for long is old news, and gets no agent.
+const DRAFTS = path.join(os.homedir(), ".local/state/herdr-pr-autofix/drafts.json");
+const DRAFTS_MS = 10 * 60_000;
 // Each project folder logs its pull requests in these files.
 const TRACKING = ["MERGED-PRS.md", "TODO.md", "README.md"];
 
@@ -81,17 +86,26 @@ function load(): Agent[] {
 	}
 }
 
-function save(agents: Agent[]) {
-	fs.mkdirSync(path.dirname(STATE), { recursive: true });
-	fs.writeFileSync(`${STATE}.tmp`, JSON.stringify(agents));
-	fs.renameSync(`${STATE}.tmp`, STATE);
+function loadDrafts(): Set<string> | undefined {
+	try {
+		const { at, urls } = JSON.parse(fs.readFileSync(DRAFTS, "utf8"));
+		return Date.now() - at <= DRAFTS_MS ? new Set(urls) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function write(file: string, data: unknown) {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(`${file}.tmp`, JSON.stringify(data));
+	fs.renameSync(`${file}.tmp`, file);
 }
 
 export default function herdrPrAutofix(pi: ExtensionAPI) {
 	if (!ENABLED) return;
 	const herdr = herdrClient(pi.exec);
-	// url -> isDraft at the last poll of this session.
-	let drafts: Map<string, boolean> | undefined;
+	// The urls of the drafts at the last poll of this session.
+	let drafts: Set<string> | undefined;
 	// terminal -> the turn at which the last poll saw it done.
 	const doneAt = new Map<string, number>();
 	let queue = Promise.resolve();
@@ -237,12 +251,13 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 	}
 
 	async function onPoll(poll: Poll) {
-		const before = drafts;
-		drafts = new Map(poll.open.map(p => [p.url, p.isDraft]));
+		const before = drafts ?? loadDrafts();
+		const now = new Set(poll.open.filter(p => p.isDraft).map(p => p.url));
+		drafts = now;
 		const saved = load();
 		const agents = await sweep(poll, saved);
 		const moved = before
-			? poll.open.filter(p => before.get(p.url) === true && !p.isDraft && p.author?.login === poll.login)
+			? poll.open.filter(p => before.has(p.url) && !p.isDraft && p.author?.login === poll.login)
 			: [];
 		for (const p of moved) {
 			if (agents.some(a => a.url === p.url && a.head === p.headRefOid)) continue;
@@ -255,7 +270,9 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 			}
 			tell(p, o);
 		}
-		if (JSON.stringify(agents) !== JSON.stringify(saved)) save(agents);
+		if (JSON.stringify(agents) !== JSON.stringify(saved)) write(STATE, agents);
+		// Last, so that a restart during a start finds the move again.
+		write(DRAFTS, { at: Date.now(), urls: [...now] });
 	}
 
 	// Polls arrive each minute; a start can take 45 s, so they run one at a time.
