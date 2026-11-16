@@ -14,6 +14,7 @@ export function prFixture(n: number, merged = 20, login = "bench-user") {
 	const open = Array.from({ length: n }, (_, i) => {
 		const ready = i % 3 === 0;
 		return {
+			id: `PR_${1000 + i}`,
 			number: 1000 + i,
 			title: `Bench pull request ${i} with a title of a usual length`,
 			isDraft: i % 4 === 1,
@@ -43,9 +44,17 @@ export function prFixture(n: number, merged = 20, login = "bench-user") {
 
 // The extra GraphQL calls t3-prs makes after a poll, by the word in their query that tells them
 // apart: comments.js (one call per pull request whose updatedAt changed), owners.js (files and
-// CODEOWNERS of an approved pull request, then the members of each owning team).
-export type QueryKind = "comments" | "owners" | "team";
-export const QUERY_WORD: Record<QueryKind, string> = { comments: "reviewThreads", owners: "object(expression", team: "organization(login" };
+// CODEOWNERS of an approved pull request, then the members of each owning team), and a follow-up
+// `nodes(ids: …)` query a poll may make for some fields of some pull requests (merge state).
+export type QueryKind = "comments" | "owners" | "team" | "merge";
+export const QUERY_WORD: Record<QueryKind, string> = { comments: "reviewThreads", owners: "object(expression", team: "organization(login", merge: "nodes(ids:" };
+
+// The answer to a `nodes(ids: …)` follow-up for prFixture's open pull requests (the first n):
+// each by its id, with the merge state prFixture gives it.
+export function mergeFixture(n = 100) {
+	const nodes = prFixture(n, 0).data.viewer.pullRequests.nodes.map(p => ({ id: p.id, mergeable: p.mergeable, mergeStateStatus: p.mergeStateStatus }));
+	return { data: { nodes } };
+}
 
 // The answer to comments.js's query: people's comments, review texts and inline threads, and a bot.
 export function commentsFixture(people = 6, threads = 5) {
@@ -120,6 +129,7 @@ case "$1 $2" in
       *"${QUERY_WORD.comments}"*) [ -f "${dir}/comments.json" ] && F="${dir}/comments.json" ;;
       *"${QUERY_WORD.owners}"*) [ -f "${dir}/owners.json" ] && F="${dir}/owners.json" ;;
       *"${QUERY_WORD.team}"*) [ -f "${dir}/team.json" ] && F="${dir}/team.json" ;;
+      *"${QUERY_WORD.merge}"*) [ -f "${dir}/merge.json" ] && F="${dir}/merge.json" ;;
     esac
     cat "$F" ;;
   "repo view") echo '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":false}' ;;

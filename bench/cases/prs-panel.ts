@@ -4,8 +4,10 @@
 // approved one whose head, base or reviews changed. Measured here:
 //   - real GitHub: one poll with the mod's own query through curl (network only) and through gh
 //     (as the mod runs it), gh's start alone, and one real comments call (3 points per suite run,
-//     whatever --runs). BENCH_PRS_OWNERS=1 adds one owners.js call (+1 point); BENCH_PRS_PROFILE=1
-//     times the poll with one group of fields left out at a time (+9 points, logged only);
+//     whatever --runs); then the mod's own poll end to end (load() with the real gh for its poll
+//     queries only, poll-real: 1 point per real call, at most 3 polls). BENCH_PRS_OWNERS=1 adds one
+//     owners.js call (+1 point); BENCH_PRS_PROFILE=1 times the poll with one group of fields left
+//     out at a time (+9 points, logged only);
 //   - in this process (lib/modvm.ts runs main.js with stub Herdr modules): parse + state update +
 //     render after a poll, render alone with 20/50/100 open pull requests, the work of a poll that
 //     changed nothing, and how many gh calls a poll makes;
@@ -17,13 +19,14 @@
 //     (JavaScript only: check does no layout or paint).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { commentsFixture, installFakeGh, ownersFixture, prFixture, QUERY_WORD, teamFixture } from "../lib/fakegh.ts";
+import { commentsFixture, installFakeGh, mergeFixture, ownersFixture, prFixture, QUERY_WORD, teamFixture } from "../lib/fakegh.ts";
 import { ghStartMs, graphql, viaGh } from "../lib/github.ts";
 import { find, host, loadMod, ModVm, nextIdle, resetHost, type ExecResult } from "../lib/modvm.ts";
 import { now, run } from "../lib/proc.ts";
 import { median } from "../lib/stats.ts";
 import { type ProbeInput, type ProbeResult, runProbe } from "../lib/prs-panel-probe.ts";
 import type { Case, Ctx, Measure } from "../lib/types.ts";
+import { REAL_HOME } from "../lib/guard.ts";
 
 const ID = "prs-panel";
 // Renders per draw sample: one sample is the median of these.
@@ -73,10 +76,18 @@ function viaFakeGh(gh: string) {
 	};
 }
 
+// The real gh login's token, as lib/github.ts gets it (it does not export its copy).
+async function realToken(ctx: Ctx): Promise<string> {
+	const r = await run(ctx.sandbox.realGh, ["auth", "token"], { env: { HOME: REAL_HOME } });
+	if (r.code !== 0 || !r.stdout.trim()) throw new Error("gh auth token failed: is gh logged in?");
+	return r.stdout.trim();
+}
+
 const extras = () => ({
 	comments: JSON.stringify(commentsFixture()),
 	owners: JSON.stringify(ownersFixture()),
 	team: JSON.stringify(teamFixture()),
+	merge: JSON.stringify(mergeFixture()),
 });
 
 // The poll's query with one group of fields left out at a time (for BENCH_PRS_PROFILE=1). A
@@ -209,6 +220,7 @@ export default {
 		fake.setQuery("comments", commentsFixture());
 		fake.setQuery("owners", ownersFixture());
 		fake.setQuery("team", teamFixture());
+		fake.setQuery("merge", mergeFixture());
 		host.exec = viaFakeGh(gh);
 		{
 			const startup: number[] = [];
@@ -320,7 +332,7 @@ export default {
 			};
 			// Render-only checks fill the list with smaller comment and owner answers (same rows and
 			// marks), so the one load() they need leaves most of check's time for renders.
-			const small = { comments: JSON.stringify(commentsFixture(2, 1)), owners: JSON.stringify(ownersFixture(1)), team: JSON.stringify(teamFixture()) };
+			const small = { ...extras(), comments: JSON.stringify(commentsFixture(2, 1)), owners: JSON.stringify(ownersFixture(1)) };
 			const sizes = [20, 50, 100];
 			// Per sample and size: one check for the polls (no renders), and RENDER_CHECKS that spend
 			// their time on renders; a draw sample is the median of all their rounds.
@@ -434,6 +446,62 @@ export default {
 				}
 			}
 		} else ctx.log(`${ID}: no pull request to read comments of; comments-network left out`);
+
+		// --- 6. The mod's own poll on real GitHub, end to end -------------------------------------
+		// load() in the vm harness with an exec that runs the real gh only for the poll's own GraphQL
+		// (the mod's QUERY, or a `nodes(ids:` follow-up query a mod may add for a second step); the
+		// comment and owner queries get the fixtures at once, so only the poll is timed and paid for.
+		// Each sample starts from an empty list, so the poll changes it and render() runs.
+		try {
+			const token = await realToken(ctx);
+			const pollArg = `query=${query}`;
+			let real = 0;
+			const inflight: Promise<unknown>[] = [];
+			const answer = instant(extras());
+			host.exec = async (cmd, args) => {
+				if (cmd !== "gh") return { code: 1, stdout: "", stderr: `bench: only gh runs here, not ${cmd}` };
+				const kind = kindOf(args);
+				if (kind !== "poll" && kind !== "merge") return answer(cmd, args);
+				if (args[0] !== "api" || args[1] !== "graphql" || !(args[3] === pollArg || args[3]?.includes("nodes(ids:")))
+					return { code: 1, stdout: "", stderr: `bench: refused gh ${args.slice(0, 2).join(" ")} on real GitHub` };
+				real++;
+				// 1 point per call: GitHub's smallest cost, and what the poll costs (see poll-network).
+				ctx.spend(1);
+				const call = run(ctx.sandbox.realGh, args, { env: { GH_TOKEN: token } });
+				inflight.push(call);
+				return call;
+			};
+			const vm = new ModVm(Mod).init();
+			const samples: number[] = [];
+			const calls: number[] = [];
+			for (let s = 0; s < Math.min(ctx.runs, 3); s++) {
+				vm.mod.prs = null;
+				vm.mod.merged = null;
+				vm.draws.length = 0;
+				real = 0;
+				inflight.length = 0;
+				const t0 = now();
+				await vm.mod.load(vm.cx());
+				const loaded = now();
+				// A mod may start its second query without waiting for it inside load(): wait for every
+				// real call, then let its handler update and draw.
+				while (inflight.length) await Promise.all(inflight.splice(0));
+				await Bun.sleep(0);
+				const last = vm.draws.at(-1);
+				if (vm.mod.error || !last) {
+					ctx.log(`${ID}: a real poll failed, left out: ${vm.mod.error ?? "no render"}`);
+					continue;
+				}
+				// Until load() returned or its last render, whichever came later.
+				samples.push(Math.max(loaded, last.at) - t0);
+				calls.push(real);
+			}
+			if (samples.length)
+				out.push(measure("poll-real", "The mod's own poll on real GitHub: load() start to its last render", "total", samples, `${median(calls)} real gh call(s) per poll, 1 point each; ${Math.min(ctx.runs, 3)} polls at most; comment and owner queries answered from fixtures (included, about 1 ms)`));
+			facts.push(`poll-real: ${samples.map(x => x.toFixed(0)).join(", ")} ms, ${calls.join("/")} real calls`);
+		} catch (err) {
+			ctx.log(`${ID}: poll-real left out: ${err}`);
+		}
 
 		for (const f of facts) ctx.log(`${ID}: ${f}`);
 		return out;

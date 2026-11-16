@@ -67,6 +67,7 @@ function benchKind(args) {
   if (q.includes("reviewThreads")) return "comments";
   if (q.includes("object(expression")) return "owners";
   if (q.includes("organization(login")) return "team";
+  if (q.includes("nodes(ids:")) return "merge";
   return "poll";
 }
 export default class Probe extends PullRequests {
