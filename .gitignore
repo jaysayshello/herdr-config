@@ -5,3 +5,6 @@ jsconfig.json
 
 # Local sidebar data: pinned spaces and sections use work space names.
 herdr-app/spaces.json
+
+# Performance suite output (bench/run.sh)
+bench/results/
