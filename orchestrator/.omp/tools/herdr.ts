@@ -110,7 +110,8 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		return { spaces: local, selfSpace, machine, hcId };
 	}
 
-	// Waits up to 45 s for omp on a new terminal to take its first prompt.
+	// Waits up to 45 s for omp on a new terminal to take its first prompt. It checks every 100 ms: one
+	// check (hc get) takes about 15 ms, and a 500 ms step added about 0.35 s to each start.
 	async function waitStarted(terminal: string, signal?: AbortSignal) {
 		const deadline = Date.now() + 45_000;
 		for (;;) {
@@ -119,7 +120,7 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 			if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
 			if (Date.now() >= deadline)
 				throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
-			await sleep(500, signal);
+			await sleep(100, signal);
 		}
 	}
 
