@@ -3,21 +3,20 @@
 // every poll on this Mac spends together (t3-prs in each Herdr window, its follow-up queries, and
 // herdr-pr-ready).
 // The GraphQL queries are read from the repo files at run time, so a change to a query shows here.
-// Real GitHub reads: the poll query once per run through curl and once through gh, plus one call
-// for each other query shape per suite run. The local part loads both extensions with a fake `pi`
-// whose exec answers gh and hc itself, so no real gh, git, hc or herdr-app runs from them, and
+// Real GitHub reads: the poll query once per run through curl and once through gh, the
+// extension's own poll (all its queries) a few times, plus one call for each other query shape
+// per suite run. The local part loads both extensions with a fake `pi` whose exec answers gh and
+// hc from memory, so no real gh, git, hc or herdr-app runs from them, and
 // their state files land in the sandbox home.
-import { assertNotReal } from "../lib/guard.ts";
-import { fakeCtx, fakePi, orchFile } from "../lib/orch.ts";
+import { assertNotReal, REAL_HOME } from "../lib/guard.ts";
+import { type ExecOptions, fakeCtx, fakePi, orchFile } from "../lib/orch.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { checkCodeOwners } from "../../herdr-app/mods/t3-prs/owners.js";
-import { fetchComments } from "../../herdr-app/mods/t3-prs/comments.js";
 import { prFixture } from "../lib/fakegh.ts";
 import { ghStartMs, graphql, viaGh } from "../lib/github.ts";
 import { median } from "../lib/stats.ts";
-import { now } from "../lib/proc.ts";
+import { now, run } from "../lib/proc.ts";
 import type { Case, Ctx, Measure } from "../lib/types.ts";
 
 // The terminal id the fake session claims to be. Only the fake exec below ever sees it.
@@ -29,6 +28,8 @@ const WARMUP = 2;
 const OWNER_CALLS_MAX = 4;
 // How many Herdr windows run t3-prs: one copy of the panel per window. The person runs one.
 const WINDOWS = Number(process.env.BENCH_HERDR_WINDOWS ?? 1);
+// Real polls of the extension itself: each costs a point or two, so a few at most.
+const REAL_RUNS = 3;
 
 // The fields of t3-prs's answer this case reads.
 interface T3Pr {
@@ -105,18 +106,28 @@ async function network(ctx: Ctx, query: string) {
 	return out;
 }
 
+// The real gh login's token, as lib/github.ts gets it (it does not export its copy).
+async function realToken(ctx: Ctx): Promise<string> {
+	const r = await run(ctx.sandbox.realGh, ["auth", "token"], { env: { HOME: REAL_HOME } });
+	if (r.code !== 0 || !r.stdout.trim()) throw new Error("gh auth token failed: is gh logged in?");
+	return r.stdout.trim();
+}
+
+// What the fake exec gives for `gh api graphql <args>`: from memory, or from the real gh.
+type GraphqlAnswer = (args: string[], o?: ExecOptions) => Promise<{ code: number; stdout: string; stderr: string; killed: boolean }>;
+
 // Loads herdr-pr-ready.ts (and herdr-pr-autofix.ts when `autofix`) with a fake pi and starts a
 // session in the space "orchestrator", catching the poll timer instead of waiting for it.
-async function loadPoller(ctx: Ctx, stdout: string, autofix: boolean) {
+async function loadPoller(ctx: Ctx, answer: GraphqlAnswer, autofix: boolean) {
 	const readyFile = orchFile(ctx.repo, "extensions/herdr-pr-ready.ts");
 	const first = num(constant(readyFile, "FIRST_MS"));
 	const every = num(constant(readyFile, "EVERY_MS"));
 	const calls: { cmd: string; args: string[]; answered: boolean }[] = [];
 	const pi = fakePi({
-		async exec(cmd, args) {
+		async exec(cmd, args, o) {
 			if (cmd === "gh" && args[0] === "api" && args[1] === "graphql") {
 				calls.push({ cmd, args, answered: true });
-				return ok(stdout);
+				return answer(args, o);
 			}
 			if (cmd === "hc" && args[0] === "get" && args[1] === FAKE_TERMINAL) {
 				calls.push({ cmd, args, answered: true });
@@ -204,13 +215,6 @@ export default {
 		if (net.noMergeState.length)
 			measures.push({ id: "pr-ready.poll-server-no-merge-state", label: "Profile: poll query without mergeStateStatus, request sent to first byte", unit: "ms", kind: "network", better: "none", samples: net.noMergeState, note: `first ${PROFILE_RUNS} runs only; compare with poll-server` });
 
-		// 2. Local: the extensions' own work per poll, with gh answered at once from memory: the
-		// recorded real answer (without the rateLimit the suite added), or 30 fixture PRs.
-		const viewer: Viewer = net.viewer ?? prFixture(30).data.viewer;
-		if (!net.viewer) ctx.log("pr-ready: no real poll answer; poll-local uses prFixture(30)");
-		const stdout = JSON.stringify({ data: { viewer } });
-		const openCount = viewer.pullRequests.nodes.length;
-
 		// The state files the code under test computes from os.homedir(): they must be the sandbox ones.
 		const stateDir = path.join(os.homedir(), ".local/state");
 		const readyState = path.join(stateDir, "herdr-pr-ready/notified.json");
@@ -219,7 +223,71 @@ export default {
 		assertNotReal(drafts);
 		if (!readyState.startsWith(`${ctx.sandbox.home}/`)) throw new Error(`state path ${readyState} is not in the sandbox`);
 
-		const both = await loadPoller(ctx, stdout, true);
+		// 2. The extension's own poll against real GitHub, end to end: every gh graphql call it makes
+		// (the main query, and any follow-up such as a check query) through the real gh, until it
+		// sends the poll event. The answers are kept for the local part below.
+		const { POLL_EVENT } = await import(readyFile);
+		const recorded = { main: undefined as string | undefined, check: undefined as string | undefined };
+		const pollReal: number[] = [];
+		const callsPerPoll: number[] = [];
+		const token = await realToken(ctx);
+		let firstCall: number | undefined;
+		let emitted: number | undefined;
+		let calls = 0;
+		const realGh: GraphqlAnswer = async (args, o) => {
+			firstCall ??= now();
+			calls++;
+			const r = await run(ctx.sandbox.realGh, args, { env: { GH_TOKEN: token }, signal: o?.signal, timeoutMs: o?.timeout });
+			// The suite cannot add rateLimit to a query under test: 1 point per call is GitHub's
+			// smallest cost, and what these queries cost when asked with rateLimit.
+			ctx.spend(1);
+			if (r.code === 0) {
+				if (args.some(a => a.includes("nodes(ids:"))) recorded.check ??= r.stdout;
+				else recorded.main ??= r.stdout;
+			}
+			return r;
+		};
+		const live = await loadPoller(ctx, realGh, false);
+		live.pi.events.on(POLL_EVENT, () => (emitted = now()));
+		try {
+			for (let i = 0; i < Math.min(ctx.runs, REAL_RUNS); i++) {
+				firstCall = emitted = undefined;
+				calls = 0;
+				await live.poll();
+				if (firstCall === undefined || emitted === undefined) ctx.log("pr-ready: a real poll sent no poll event (gh failed?)");
+				else {
+					pollReal.push(emitted - firstCall);
+					callsPerPoll.push(calls);
+				}
+			}
+		} finally {
+			await live.end();
+		}
+		const gqlPerPoll = callsPerPoll.length ? median(callsPerPoll) : 1;
+		if (pollReal.length)
+			measures.push({ id: "pr-ready.poll-real", label: "The extension's own poll on real GitHub, first gh call to poll event", unit: "ms", kind: "total", samples: pollReal, note: `${gqlPerPoll} gh graphql call(s) per poll, about 1 point each (estimated); ${Math.min(ctx.runs, REAL_RUNS)} polls at most` });
+
+		// 3. Local: the extensions' own work per poll, with gh answered at once from memory: the
+		// recorded real answers (the poll's own, else the suite's without its rateLimit), or 30 fixture PRs.
+		const viewer: Viewer = recorded.main ? JSON.parse(recorded.main).data.viewer : (net.viewer ?? prFixture(30).data.viewer);
+		if (!recorded.main && !net.viewer) ctx.log("pr-ready: no real poll answer; poll-local uses prFixture(30)");
+		// A check query asks by node id: give fixture PRs one.
+		for (const p of viewer.pullRequests.nodes as { id?: string; number: number }[]) p.id ??= `PR_bench_${p.number}`;
+		const stdout = JSON.stringify({ data: { viewer } });
+		const openCount = viewer.pullRequests.nodes.length;
+		const byId = new Map<string, string>();
+		for (const p of viewer.pullRequests.nodes as { id: string; mergeStateStatus?: string }[]) if (p.mergeStateStatus) byId.set(p.id, p.mergeStateStatus);
+		for (const n of recorded.check ? (JSON.parse(recorded.check).data.nodes as ({ id: string; mergeStateStatus: string } | null)[]) : []) if (n) byId.set(n.id, n.mergeStateStatus);
+		// `nodes(ids: [...]) { ... on PullRequest { id mergeStateStatus } }`: the recorded status of
+		// each id (BLOCKED when none was recorded); any other query gets the main answer.
+		const fromMemory: GraphqlAnswer = async args => {
+			const ids = args.join(" ").match(/nodes\(ids: (\[[^\]]*\])/)?.[1];
+			if (!ids) return ok(stdout);
+			const nodes = (JSON.parse(ids) as string[]).map(id => ({ id, mergeStateStatus: byId.get(id) ?? "BLOCKED" }));
+			return ok(JSON.stringify({ data: { nodes } }));
+		};
+
+		const both = await loadPoller(ctx, fromMemory, true);
 		let pollLocal: number[] = [];
 		const eventLocal: number[] = [];
 		try {
@@ -229,7 +297,6 @@ export default {
 			if (!fs.existsSync(drafts)) throw new Error("herdr-pr-autofix wrote no drafts file in the sandbox home");
 			pollLocal = await timePolls(both.poll, ctx.runs);
 			// The autofix handler alone: the same poll data straight on the event bus.
-			const { POLL_EVENT } = await import(readyFile);
 			const data = { login: viewer.login, open: viewer.pullRequests.nodes, merged: viewer.merged.nodes };
 			for (let i = 0; i < ctx.runs; i++) {
 				// A mark in the drafts file that the handler's last step (its drafts write) replaces.
@@ -251,7 +318,7 @@ export default {
 		);
 
 		// Profile: the same poll without autofix, and the parts of the pr-ready poll on their own.
-		const alone = await loadPoller(ctx, stdout, false);
+		const alone = await loadPoller(ctx, fromMemory, false);
 		try {
 			await timePolls(alone.poll, WARMUP);
 			const solo = await timePolls(alone.poll, Math.max(ctx.runs, 5));
@@ -281,7 +348,10 @@ export default {
 		// t3-prs's own query takes its own time; gh start comes on top, as the panel runs gh.
 		const t3Ms = t3.totalMs + median(net.ghStart);
 		// Each loop sleeps its interval after the poll ends, so a poll's own time adds to the period.
-		const readyPerHour = 3_600_000 / (EVERY_MS + ghMs);
+		// The extension's poll is all its queries: its own real time when measured.
+		const readyPerHour = 3_600_000 / (EVERY_MS + (pollReal.length ? median(pollReal) : ghMs));
+		// Main query plus any follow-up calls (1 point each), as the real polls made them just now.
+		const readyPerPoll = net.cost + Math.max(0, gqlPerPoll - 1);
 		const t3PerHour = (3_600_000 / (T3_EVERY + t3Ms)) * WINDOWS;
 		const prs = (t3.data.viewer.pullRequests.nodes as (T3Pr | null)[]).filter((p): p is T3Pr => p !== null);
 		// Follow-ups run only when a PR changed, in each copy of the panel: comments when updatedAt
@@ -301,6 +371,9 @@ export default {
 		};
 		const comments = { calls: 0, cost: 0 };
 		const owners = { calls: 0, cost: 0 };
+		// Dynamic: the checkout under test (--repo) is chosen at run time.
+		const { fetchComments } = await import(path.join(ctx.repo, "herdr-app/mods/t3-prs/comments.js"));
+		const { checkCodeOwners } = await import(path.join(ctx.repo, "herdr-app/mods/t3-prs/owners.js"));
 		if (prs[0])
 			await fetchComments(counted(comments), prs[0].repository.nameWithOwner, prs[0].number, prs[0].author?.login ?? "").catch((err: unknown) =>
 				ctx.log(`pr-ready: comments query failed: ${why(err)}`),
@@ -318,7 +391,7 @@ export default {
 			t3: t3PerHour * t3.cost,
 			comments: recent.length * commentCost * WINDOWS,
 			owners: recentApproved.length * ownerCost * WINDOWS,
-			ready: readyPerHour * net.cost,
+			ready: readyPerHour * readyPerPoll,
 		};
 		const total = parts.t3 + parts.comments + parts.owners + parts.ready;
 		const r = Math.round;
@@ -331,7 +404,7 @@ export default {
 			samples: [r(total)],
 			note:
 				`t3-prs poll ${r(parts.t3)} (${r(t3PerHour)} polls/h x ${t3.cost} pt, ${WINDOWS} window(s), every ${T3_EVERY / 1000} s + ${r(t3Ms)} ms query); ` +
-				`herdr-pr-ready ${r(parts.ready)} (${r(readyPerHour)} polls/h x ${net.cost} pt); ` +
+				`herdr-pr-ready ${r(parts.ready)} (${r(readyPerHour)} polls/h x ${readyPerPoll} pt over ${gqlPerPoll} call(s) per poll now); ` +
 				`t3-prs comments ${r(parts.comments)} (${recent.length} PRs updated in the last hour x ${commentCost} pt); ` +
 				`t3-prs code owners ${r(parts.owners)} (${recentApproved.length} approved PRs updated in the last hour x ${ownerCost} pt over ${owners.calls} call(s)${sample ? "" : ", none approved, cost not read"}); ` +
 				"herdr-pr-autofix 0 (it reads the poll event). " +
@@ -346,7 +419,7 @@ export default {
 			samples: [0],
 			note: "No poll uses REST. Only clicks do: t3-prs gh pr ready/merge/close and gh repo view (merge method, cached per panel copy); herdr-pr-autofix runs gh repo clone when a draft moves to ready and no clone exists.",
 		});
-		const spent = net.cost * (net.curl.length + net.gh.length + net.noMergeState.length) + t3.cost + comments.cost + owners.cost;
+		const spent = net.cost * (net.curl.length + net.gh.length + net.noMergeState.length) + callsPerPoll.reduce((a, b) => a + b, 0) + t3.cost + comments.cost + owners.cost;
 		ctx.log(`pr-ready: real GitHub points this case spent: ${spent} (${comments.calls} comments call(s), ${owners.calls} code owner call(s))`);
 		return measures;
 	},
