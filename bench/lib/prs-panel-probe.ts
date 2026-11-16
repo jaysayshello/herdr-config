@@ -1,7 +1,8 @@
 // A probe copy of t3-prs for `herdr-app check`, which loads a mod in Herdr's own QuickJS and renders
-// it once, without a window. The copy's init() runs the mod's real poll handling (load()) and its
-// render() runs the mod's real render() on fixtures, timed in QuickJS; then it throws
-// "BENCH {json}", because check prints a render error but not console.log.
+// it once, without a window. The copy's init() runs the mod's own init() (without starting its
+// tasks) and its real poll handling (load()); its render() runs the mod's real render() on
+// fixtures, timed in QuickJS; then it throws "BENCH {json}", because check prints a render error
+// but not console.log.
 // check runs no promise jobs after init (only a cx.spawn task up to its first await), so the copy
 // has `async`/`await` taken out of main.js, owners.js and comments.js and its exec answers at once:
 // load() and its checks run start to end inside init. Its exec answers gh from the fixtures in
@@ -18,7 +19,8 @@ import type { Sandbox } from "./sandbox.ts";
 export interface ProbeInput {
 	// Answers by kind of gh call: poll, comments, owners, team.
 	answers: Record<string, string>;
-	// At most this many polls and renders, and only within budget ms from init's start.
+	// At most this many polls and renders, and only within budget ms from init's start. polls 0:
+	// one load() to fill the list, then all the budget goes to renders.
 	polls: number;
 	renders: number;
 	budget: number;
@@ -35,10 +37,17 @@ export interface ProbeResult {
 	first: number;
 	poll: number;
 	quiet: number;
+	// Median render with the same data as the render before it (between polls), and the first
+	// render after a poll's new objects (the same unless the mod caches per row).
 	render: number;
+	firstRender: number;
+	// Every round's times, so a case can pool rounds from several checks.
+	renderTimes: number[];
+	firstTimes: number[];
 	polls: number;
 	renders: number;
-	// The median render with the variant's part switched off (null without a variant).
+	// The median first render with the variant's part switched off (null without a variant);
+	// compare with firstRender.
 	variantRender: number | null;
 	total: number;
 	prs: number;
@@ -61,17 +70,24 @@ function benchKind(args) {
   return "poll";
 }
 export default class Probe extends PullRequests {
-  init(_props, cx) {
+  init(props, cx) {
     this.t0 = BENCH_NOW();
-    // The fields PullRequests.init sets, without its poll loop and command loop.
-    Object.assign(this, { prs: null, merged: null, error: null, loading: false, manual: false, folded: {},
-      approvals: new Map(), methods: new Map(), comments: new Map(), seen: {}, cursor: null, back: null });
-    this.handle = cx.focus_handle();
     try {
+      // The mod's own init, so every field it sets (caches included) is there, whatever the mod's
+      // shape. Its spawned tasks (poll loop, command loop) are not run: without await they would
+      // never return.
+      super.init(props, { notify() {}, spawn() {}, focus_handle: () => cx.focus_handle() });
+      Object.assign(this, { prs: null, merged: null, error: null, folded: {}, seen: {} });
       this.polls();
     } catch (e) {
       this.failed = e;
     }
+  }
+  // A poll makes new objects for every pull request even when nothing changed; caches keyed on
+  // them start over. This does the same without the poll's own work.
+  benchFresh() {
+    this.prs = this.prs.map((p) => ({ ...p }));
+    this.merged = this.merged.map((p) => ({ ...p }));
   }
   // check stops a mod that works too long ("interrupted"): loop only while time is left.
   left(share) {
@@ -91,6 +107,7 @@ export default class Probe extends PullRequests {
       let t = BENCH_NOW();
       this.load(quietCx);
       first.push(BENCH_NOW() - t);
+      if (BENCH.polls === 0) break;
       this.prs = null; this.merged = null;
       t = BENCH_NOW();
       this.load(quietCx);
@@ -103,8 +120,11 @@ export default class Probe extends PullRequests {
       prs: this.prs.length, comments: this.comments.size, approvals: this.approvals.size, error: this.error };
   }
   // check's one render: time the mod's own render() inside it (Herdr takes click handlers only
-  // while a render runs), then report everything as this render's error. With BENCH.variant, the
-  // renders alternate: as is, then with one part switched off, for a paired comparison.
+  // while a render runs), then report everything as this render's error. Each round renders twice:
+  // first right after new objects (the first render after a poll), then again with the same data
+  // (what Herdr does between polls, on every live-data change); a mod that caches per row is
+  // faster in the second. With BENCH.variant, each round adds a render with one part switched
+  // off, after new objects, compared with the first render.
   render(cx) {
     let out;
     try {
@@ -114,20 +134,31 @@ export default class Probe extends PullRequests {
         approval: () => { this.approval = () => null; },
         merged: () => { this.folded = { merged: true }; },
       }[BENCH.variant];
-      const times = [], variant = [];
-      do {
+      const firsts = [], times = [], variant = [];
+      // A new round starts only when one more like the last still fits in the budget.
+      let round = 0;
+      while (times.length < BENCH.renders && (times.length === 0 || BENCH_NOW() - this.t0 + round < BENCH.budget)) {
+        const start = BENCH_NOW();
+        this.benchFresh();
         let t = BENCH_NOW();
         super.render(cx);
-        times.push(BENCH_NOW() - t);
-        if (!off) continue;
-        off();
+        firsts.push(BENCH_NOW() - t);
         t = BENCH_NOW();
         super.render(cx);
-        variant.push(BENCH_NOW() - t);
-        delete this.talk; delete this.approval; this.folded = {};
-      } while (times.length < BENCH.renders && this.left(1));
-      out = "BENCH " + JSON.stringify({ clock: BENCH_CLOCK, ...this.result, render: benchMedian(times), renders: times.length,
-        variantRender: off ? benchMedian(variant) : null, total: BENCH_NOW() - this.t0 });
+        times.push(BENCH_NOW() - t);
+        if (off) {
+          off();
+          this.benchFresh();
+          t = BENCH_NOW();
+          super.render(cx);
+          variant.push(BENCH_NOW() - t);
+          delete this.talk; delete this.approval; this.folded = {};
+        }
+        round = BENCH_NOW() - start;
+      }
+      out = "BENCH " + JSON.stringify({ clock: BENCH_CLOCK, ...this.result, render: benchMedian(times), firstRender: benchMedian(firsts),
+        renderTimes: times, firstTimes: firsts,
+        renders: times.length, variantRender: off ? benchMedian(variant) : null, total: BENCH_NOW() - this.t0 });
     } catch (e) {
       out = "BENCH-ERROR " + String((e && e.stack) || e).split("\\n").join(" | ");
     }

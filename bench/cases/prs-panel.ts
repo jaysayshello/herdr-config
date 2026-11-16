@@ -33,6 +33,8 @@ const POLLS = 20;
 // ms of QuickJS work per herdr-app check probe: check stops a mod that works much longer
 // ("interrupted"; with this probe, already at 200 ms).
 const PROBE_BUDGET = 80;
+// Extra render-only herdr-app checks per QuickJS sample: each fits only a few renders.
+const RENDER_CHECKS = 3;
 
 // The text of `const NAME = \`…\`;` in a mod file: a query exactly as the mod sends it.
 function constText(file: string, name: string): string {
@@ -307,25 +309,53 @@ export default {
 		// --- 5. The same poll and render in Herdr's QuickJS (herdr-app check, no window) -----------
 		try {
 			const dir = ctx.sandbox.work(ID);
-			const probe = (n: number, variant?: ProbeInput["variant"]) =>
-				runProbe(ctx.sandbox, modDir, dir, { answers: { poll: JSON.stringify(prFixture(n, 20)), ...extras() }, polls: variant ? 1 : POLLS, renders: RENDERS, budget: PROBE_BUDGET, variant });
+			// A check that failed (check's time limit hit even at half budget) is logged and left out.
+			const probe = async (n: number, input: Partial<ProbeInput>) => {
+				try {
+					return await runProbe(ctx.sandbox, modDir, dir, { answers: { poll: JSON.stringify(prFixture(n, 20)), ...extras() }, polls: 1, renders: RENDERS, budget: PROBE_BUDGET, ...input });
+				} catch (err) {
+					ctx.log(`${ID}: a QuickJS check (${n} open) left out: ${err}`);
+					return null;
+				}
+			};
+			// Render-only checks fill the list with smaller comment and owner answers (same rows and
+			// marks), so the one load() they need leaves most of check's time for renders.
+			const small = { comments: JSON.stringify(commentsFixture(2, 1)), owners: JSON.stringify(ownersFixture(1)), team: JSON.stringify(teamFixture()) };
 			const sizes = [20, 50, 100];
-			const got = new Map<number, ProbeResult[]>(sizes.map(n => [n, []]));
-			for (let s = 0; s < ctx.runs; s++) for (const n of sizes) got.get(n)!.push(await probe(n));
-			const at = (n: number, f: (r: ProbeResult) => number) => got.get(n)!.map(f);
-			const fit = (n: number) => `${Math.min(...at(n, r => r.renders))}-${Math.max(...at(n, r => r.renders))}`;
+			// Per sample and size: one check for the polls (no renders), and RENDER_CHECKS that spend
+			// their time on renders; a draw sample is the median of all their rounds.
+			type Sample = { polls: ProbeResult | null; render: number[]; first: number[] };
+			const got = new Map<number, Sample[]>(sizes.map(n => [n, []]));
+			for (let s = 0; s < ctx.runs; s++)
+				for (const n of sizes) {
+					const polls = await probe(n, { polls: POLLS, renders: 0 });
+					const draws: ProbeResult[] = [];
+					for (let i = 0; i < RENDER_CHECKS; i++) {
+						const r = await probe(n, { polls: 0, answers: { poll: JSON.stringify(prFixture(n, 20)), ...small } });
+						if (r) draws.push(r);
+					}
+					got.get(n)!.push({ polls, render: draws.flatMap(r => r.renderTimes), first: draws.flatMap(r => r.firstTimes) });
+				}
+			const at = (n: number, f: (r: ProbeResult) => number) => got.get(n)!.flatMap(s => (s.polls ? [f(s.polls)] : []));
+			const draws = (n: number, f: (s: Sample) => number[]) => got.get(n)!.flatMap(s => (f(s).length ? [median(f(s))] : []));
+			const fit = (n: number) => `${Math.min(...got.get(n)!.map(s => s.render.length))}-${Math.max(...got.get(n)!.map(s => s.render.length))}`;
+			const how = (n: number) => `${RENDER_CHECKS} herdr-app checks per sample, median of their ${fit(n)} rounds (check's time limit allows few)`;
 			for (const n of sizes)
-				out.push(measure(`quickjs-draw-${n}`, `render() with ${n} open and 20 merged, in Herdr's QuickJS`, "local", at(n, r => r.render), `one herdr-app check per sample, median of the ${fit(n)} renders that fit in its ~0.5 s limit`));
+				out.push(
+					measure(`quickjs-draw-${n}`, `render() with ${n} open and 20 merged, in Herdr's QuickJS`, "local", draws(n, s => s.render), `the same data as the render before (between polls, on every live-data change); ${how(n)}`),
+					measure(`quickjs-draw-${n}-first`, `The first render() after a poll's new objects, ${n} open, in QuickJS`, "local", draws(n, s => s.first), `equals quickjs-draw unless the mod caches per row; a poll makes new objects even when nothing changed; ${how(n)}`),
+				);
 			out.push(
 				measure("quickjs-poll", "A poll that changed the list: load() in QuickJS (20 open, caches warm)", "local", at(20, r => r.poll), "parse, compare, save and the cache checks, no render"),
 				measure("quickjs-poll-idle", "A poll that changed nothing: load() in QuickJS (20 open)", "local", at(20, r => r.quiet), "the JS work behind most 5 s polls"),
 				measure("quickjs-first-poll", "The first poll after start: load() in QuickJS with 20 comment and 7 owner answers", "local", at(20, r => r.first), "JS work only: answers come from memory"),
 			);
-			for (const n of sizes) facts.push(`quickjs n=${n}: first ${median(at(n, r => r.first)).toFixed(1)}, poll ${median(at(n, r => r.poll)).toFixed(1)}, quiet ${median(at(n, r => r.quiet)).toFixed(1)}, render ${median(at(n, r => r.render)).toFixed(1)} ms`);
-			// Where render's time goes: each part switched off in every other render (20 open).
+			for (const n of sizes)
+				facts.push(`quickjs n=${n}: first ${median(at(n, r => r.first)).toFixed(1)}, poll ${median(at(n, r => r.poll)).toFixed(1)}, quiet ${median(at(n, r => r.quiet)).toFixed(1)}, render ${median(draws(n, s => s.render)).toFixed(1)} (first after a poll ${median(draws(n, s => s.first)).toFixed(1)}) ms`);
+			// Where render's time goes: the first render after a poll with each part switched off (20 open).
 			for (const v of ["talk", "approval", "merged"] as const) {
-				const r = await probe(20, v);
-				facts.push(`quickjs render without ${v}: ${r.render.toFixed(2)} -> ${r.variantRender?.toFixed(2)} ms (${r.renders} pairs)`);
+				const r = await probe(20, { variant: v });
+				if (r) facts.push(`quickjs first render without ${v}: ${r.firstRender.toFixed(2)} -> ${r.variantRender?.toFixed(2)} ms (${r.renders} rounds)`);
 			}
 		} catch (err) {
 			ctx.log(`${ID}: QuickJS probe left out: ${err}`);
