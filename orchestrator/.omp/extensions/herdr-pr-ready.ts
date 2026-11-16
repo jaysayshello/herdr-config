@@ -2,7 +2,8 @@
 // approved, no conflicts, and required checks passed (mergeStateStatus CLEAN or HAS_HOOKS). It sends
 // a <herdr-pr-ready> message, as herdr-watch.ts sends <herdr-report>, and the orchestrator writes a
 // report box. When one of your pull requests is merged, it sends <herdr-pr-merged>. One GraphQL
-// query through gh each minute (EVERY_MS) gets both; it only reads.
+// query through gh each minute (EVERY_MS) gets both, and a second small one when a pull request
+// may be ready; they only read.
 // Ready: once per pull request and head commit, so a push after the notice can notify again. The
 // first poll on a machine only records what is already ready, so it does not post a box for each.
 // Merged: once per pull request, and only for merges after the first poll of this session.
@@ -12,8 +13,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-// The query costs 1 point of GitHub's 5,000 an hour, so a poll each minute uses about 60. The next
-// poll starts EVERY_MS after the last one ends, so two polls never overlap; GH_MS ends a hung gh.
+// The main query costs 1 point of GitHub's 5,000 an hour, so a poll each minute uses about 60. The
+// check query (CHECK) costs 1 more, only in polls that have an approved pull request with no
+// conflicts, so at most about 120 an hour. The next poll starts EVERY_MS after the last one ends,
+// so two polls never overlap; GH_MS ends a hung gh, and covers both queries.
 const EVERY_MS = 60_000;
 const FIRST_MS = 10_000;
 const GH_MS = 30_000;
@@ -22,11 +25,14 @@ const SPACE = "orchestrator";
 const STATE = path.join(os.homedir(), ".local/state/herdr-pr-ready/notified.json");
 export const POLL_EVENT = "herdr-pr-ready:poll";
 // MERGED lists merged pull requests only, so one closed without a merge never shows. A merge bumps
-// updatedAt, so a new merge is at the top of the 20.
+// updatedAt, so a new merge is at the top of the 20. mergeStateStatus is slow for GitHub to work
+// out (about 1 s of the 3 s), so this query leaves it out and CHECK asks for it.
 const QUERY = `{ viewer { login pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title url isDraft headRefName headRefOid author { login } reviewDecision mergeable mergeStateStatus repository { nameWithOwner } } }
+  nodes { id number title url isDraft headRefName headRefOid author { login } reviewDecision mergeable repository { nameWithOwner } } }
   merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
   nodes { number title url mergedAt repository { nameWithOwner } } } } }`;
+// Gets mergeStateStatus for only the pull requests that pass the other ready tests.
+const CHECK = (ids: string[]) => `{ nodes(ids: ${JSON.stringify(ids)}) { ... on PullRequest { id mergeStateStatus } } }`;
 const CLEAN: Record<string, true> = { CLEAN: true, HAS_HOOKS: true };
 // The sounds of the notices. Herdr plays its own built-in "An agent finished" sound when a worker
 // ends a turn; these must sound different from it and from each other. They obey Herdr's sound
@@ -46,13 +52,15 @@ interface Pr {
 	repository: { nameWithOwner: string };
 }
 export interface OpenPr extends Pr {
+	id: string;
 	isDraft: boolean;
 	headRefName: string;
 	headRefOid: string;
 	author: { login: string } | null;
 	reviewDecision: string | null;
 	mergeable: string;
-	mergeStateStatus: string;
+	// Set only for pull requests that are not a draft, are approved and have no conflicts.
+	mergeStateStatus?: string;
 }
 export interface Poll {
 	login: string;
@@ -92,15 +100,23 @@ export default function herdrPrReady(pi: ExtensionAPI) {
 
 	async function poll(signal: AbortSignal) {
 		const started = Date.now();
-		const r = await pi.exec("gh", ["api", "graphql", "-f", `query=${QUERY}`], { signal: AbortSignal.any([signal, AbortSignal.timeout(GH_MS)]) });
+		const gh = AbortSignal.any([signal, AbortSignal.timeout(GH_MS)]);
+		const r = await pi.exec("gh", ["api", "graphql", "-f", `query=${QUERY}`], { signal: gh });
 		if (r.code !== 0 || signal.aborted) return;
 		const viewer = JSON.parse(r.stdout).data.viewer;
 		const open = (viewer.pullRequests.nodes as OpenPr[]).filter(Boolean);
 		const lastMerged = (viewer.merged.nodes as MergedPr[]).filter(Boolean);
+		const maybe = open.filter(p => !p.isDraft && p.reviewDecision === "APPROVED" && p.mergeable === "MERGEABLE");
+		if (maybe.length > 0) {
+			const c = await pi.exec("gh", ["api", "graphql", "-f", `query=${CHECK(maybe.map(p => p.id))}`], { signal: gh });
+			if (c.code !== 0 || signal.aborted) return;
+			const status = new Map<string, string>();
+			for (const n of JSON.parse(c.stdout).data.nodes as ({ id: string; mergeStateStatus: string } | null)[])
+				if (n) status.set(n.id, n.mergeStateStatus);
+			for (const p of maybe) p.mergeStateStatus = status.get(p.id);
+		}
 		pi.events.emit(POLL_EVENT, { login: viewer.login, open, merged: lastMerged } satisfies Poll);
-		const ready = open.filter(
-			p => !p.isDraft && p.reviewDecision === "APPROVED" && p.mergeable === "MERGEABLE" && CLEAN[p.mergeStateStatus],
-		);
+		const ready = maybe.filter(p => p.mergeStateStatus && CLEAN[p.mergeStateStatus]);
 		const after = (since ??= started);
 		const newMerges = lastMerged.filter(p => Date.parse(p.mergedAt) > after && !merged.has(p.url));
 		for (const p of newMerges) merged.add(p.url);
