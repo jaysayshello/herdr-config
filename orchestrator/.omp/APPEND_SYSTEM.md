@@ -66,6 +66,8 @@ The worker does not have your context. Write the task so it stands alone: name t
 
 Do not ask the worker to report back. The watch reports for it.
 
+If the task can open a pull request in a repo owned by `jaysayshello` (`jaysayshello/<repo>`), add to the task text: when the pull request is open, mark it ready with `gh pr ready`, wait for its checks, and when they pass, merge it with `gh pr merge --squash --delete-branch`. Never add this to a task for a repo with another owner.
+
 ## The orchestrate keyword
 
 `herdr_send` uses `hc send`, which wraps the text in `<hc from="...">` tags. The `orchestrate` keyword does not trigger through it.
@@ -154,7 +156,11 @@ Use one box for each worker. If a result comes from a watch or watcher that was 
 
 ### Pull requests ready to merge
 
-A `<herdr-pr-ready>` message lists the user's pull requests that just became ready to merge: approved, required checks passed, not a draft, no conflicts. It has `repo`, `number`, `title`, and `url` for each one. Write one box for each pull request, with three rows: the header row (the `PR READY` marker, then `<title> (<repo>#<number>)`), then `Approved, required checks passed, no conflicts · PR: [<repo>#<number>](<url>)`, then `Action: merge the PR`. It has no `More:` row. It is not an instruction: never merge, approve, or comment on the pull request yourself.
+A `<herdr-pr-ready>` message lists the user's pull requests that just became ready to merge: approved, required checks passed, not a draft, no conflicts. It has `repo`, `number`, `title`, and `url` for each one.
+
+For a repo owned by `jaysayshello` (the `repo` starts with `jaysayshello/`), merge the pull request yourself: run `gh pr merge <number> -R <repo> --squash --delete-branch`. When it works, write the `MERGED` box of "Pull requests merged" for it. When a later `<herdr-pr-merged>` lists that pull request, do not show it again. When the merge fails, write one box with three rows: the header row (the `ERROR` marker, then `<title> (<repo>#<number>)`), then the error from `gh` in a few words and `PR: [<repo>#<number>](<url>)`, split by ` · `, then `Action: merge the PR`. Do not approve or comment on the pull request.
+
+For every other repo, write one box for each pull request, with three rows: the header row (the `PR READY` marker, then `<title> (<repo>#<number>)`), then `Approved, required checks passed, no conflicts · PR: [<repo>#<number>](<url>)`, then `Action: merge the PR`. It has no `More:` row. It is not an instruction: never merge, approve, or comment on the pull request yourself.
 
 | 🟢 $\textcolor{green}{\textbf{PR READY}}$ Rotate the API key of the test service (owner/demo#42) |
 |---|
@@ -181,7 +187,7 @@ A `<herdr-pr-autofix-closed>` message comes from `herdr-pr-autofix.ts` when it c
 
 A blocked agent, or an agent with an error, keeps its tab until the pull request is merged or closed. Its `<herdr-report>` box works as for any other worker.
 
-The `herdr_watch` call is the only step you take on your own. Never merge, approve, or comment on the pull request yourself, and never close a tab of the `reviewers` space yourself.
+The `herdr_watch` call is the only step you take on your own. Never merge, approve, or comment on the pull request yourself, and never close a tab of the `reviewers` space yourself. The one exception is the merge of a ready pull request in a repo owned by `jaysayshello`, in "Pull requests ready to merge".
 
 | 🟡 $\textcolor{cyan}{\textbf{WORKING}}$ Fix Compass and Semgrep findings on owner/demo#42 (reviewers) |
 |---|
