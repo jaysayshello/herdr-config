@@ -16,6 +16,7 @@ cd "$(dirname "$0")"
 MODS=$(for m in t3-agents t3-chrome t3-inbox t3-menu t3-new-menu t3-pane t3-prs t3-spaces t3-tabs tmux-keys; do echo "mods/$m"; done)
 WINDOWS_MODS="$MODS mods/t3-usage"
 ORCHESTRATOR="$HOME/Projects/herdr-orchestrator-2026-11-08/.omp"
+REX_ORCHESTRATOR="$HOME/Projects/rex-orchestrator-2026-11-15/.omp"
 EXCLUDE="--exclude=*.d.ts --exclude=jsconfig.json --exclude=.DS_Store --exclude=*.bak*"
 WSL=$(grep -qi microsoft /proc/version 2>/dev/null && echo 1 || true)
 # Files on the Windows drive all read as mode 777: give everything plain modes instead.
@@ -51,6 +52,13 @@ else
     keys.json settings.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts peon $MODS
   # omp: the hourly `omp update` LaunchAgent (the `omp` zsh function for resume is in my dotfiles repo).
   sync "$HOME/Library/LaunchAgents" omp/launchagents com.jay.omp-update.plist
+  # Rex (rex/): keys and actions, the rex-focus:// handler and the Pull requests list; per-terminal
+  # omp session resume; the Rex orchestrator's prompt, rex_* tools, rex_watch, PR notices, PR fix
+  # agents and /reload.
+  sync "$HOME/.config/rex" rex/config init.lua
+  sync "$HOME/.config/rex" rex scripts
+  sync "$HOME/.omp/agent" rex/omp extensions/rex-resume.ts
+  sync "$REX_ORCHESTRATOR" rex/orchestrator/.omp APPEND_SYSTEM.md agents tools extensions/rex-watch.ts extensions/rex-pr-ready.ts extensions/rex-pr-autofix.ts extensions/rex-reload.ts
 fi
 # omp: per-terminal session resume, and the orchestrator space's prompt, agents, herdr_* tools, herdr_watch, the spaces list before each request, PR ready notices, PR fix agents and /reload.
 sync "$HOME/.omp/agent" omp extensions/herdr-resume.ts
@@ -69,7 +77,10 @@ if [ -n "$RESTORE" ]; then
   else
     # herdr-focus:// links (the orchestrator's More rows) open with the Herdr Focus applet.
     "$HOME/.config/herdr-app/scripts/herdr-focus-install.sh"
+    # rex-focus:// links (the Rex orchestrator's More rows) open with the Rex Focus applet.
+    "$HOME/.config/rex/scripts/rex-focus-install.sh"
     echo "Restored. For the terminal app, run: herdr server reload-config"
+    echo "For Rex keys and actions, run: rex config reload"
     echo "For omp updates, run: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.jay.omp-update.plist"
   fi
   exit 0

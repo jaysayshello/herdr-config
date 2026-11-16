@@ -1,6 +1,6 @@
 # herdr-config
 
-My Herdr setup: the terminal app (`herdr`, `~/.config/herdr`) and the desktop app (`Herdr.app`, `~/.config/herdr-app`) on my Mac, and the desktop app on Windows (`windows/`), whose terminals and omp run in WSL.
+My Herdr setup: the terminal app (`herdr`, `~/.config/herdr`) and the desktop app (`Herdr.app`, `~/.config/herdr-app`) on my Mac, and the desktop app on Windows (`windows/`), whose terminals and omp run in WSL. `rex/` makes the Rex app work the same way on the Mac.
 
 Project notes, the keyboard-first rules and the bindings table: `~/Projects/ricing-herdr-2026-11-03/README.md`.
 
@@ -40,6 +40,7 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `windows/wsl/omp-resume.bash` | The bash side of omp session resume (the zsh one is in my dotfiles repo). Restores to `~/.config/herdr-wsl/` |
 | `windows/wsl/systemd/` | `omp-update.service` and `.timer`: `omp update` a minute after start and each hour, as the LaunchAgent does. Restores to `~/.config/systemd/user/` |
 | `bench/` | Performance suite: `./bench/run.sh` times Herdr's start, omp's start in a new pane, the orchestrator tools, the Pull requests panel, the PR polls and their GitHub cost, and CPU and memory, in a sandbox with a test window and core, and writes a JSON file; `bun bench/compare.ts a.json b.json` compares two runs. See `bench/README.md` |
+| `rex/` | The Rex app set up like Herdr: the same keys (`rex/config/init.lua`, listed in `rex/KEYS.md`), a Pull requests tab, `rex-focus://` links, omp session resume, and a Rex orchestrator with `rex_*` tools, `rex_watch`, PR notices, PR fix agents and `/reload`. Mac only. See `rex/README.md` |
 
 ## AI usage panel
 
