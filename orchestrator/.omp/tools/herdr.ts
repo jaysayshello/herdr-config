@@ -77,7 +77,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 // The Herdr calls the tools below make. extensions/herdr-pr-autofix.ts uses them too, to start its
-// fix agents in tabs (newTab, waitStarted) and to close those tabs (closeTab).
+// fix agents in tabs (newTab, waitStarted) and to close those tabs (closeTab), and
+// extensions/herdr-spaces.ts puts the herdr_spaces list (spaces) before each user request.
 export function herdrClient(exec: CustomToolAPI["exec"]) {
 	async function run(cmd: string, args: string[], signal?: AbortSignal): Promise<string> {
 		const r = await exec(cmd, args, { signal });
@@ -108,6 +109,41 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		const local = spaces.filter(s => (s.machine ?? null) === machine);
 		const hcId = (id: string) => (machine && id.startsWith(`${machine}/`) ? id.slice(machine.length + 1) : id);
 		return { spaces: local, selfSpace, machine, hcId };
+	}
+
+	// What herdr_spaces returns: every space but the orchestrator's own, with each terminal's state.
+	async function spaces(signal?: AbortSignal) {
+		const { spaces, selfSpace, hcId } = await view(signal);
+		const out = await Promise.all(
+			spaces
+				.filter(s => s !== selfSpace)
+				.map(async s => ({
+					id: s.id,
+					name: s.name,
+					tabs: await Promise.all(
+						s.tabs.map(async t => ({
+							id: t.id,
+							name: t.name,
+							terminals: await Promise.all(
+								t.terminals.map(async ({ terminal: id, app }) => {
+									const terminal = hcId(id);
+									// One dead terminal must not hide every other space.
+									const info = await get(terminal, signal).catch(() => undefined);
+									return {
+										terminal,
+										app: info?.status?.app ?? app ?? null,
+										state: info?.status?.state ?? null,
+										turn: info?.turn ?? null,
+										title: info?.title ?? null,
+										cwd: info?.foreground?.cwd ?? info?.cwd ?? null,
+									};
+								}),
+							),
+						})),
+					),
+				})),
+		);
+		return { self: { terminal: self ?? null, space: selfSpace?.id ?? null }, spaces: out };
 	}
 
 	// Waits up to 45 s for omp on a new terminal to take its first prompt. It checks every 100 ms: one
@@ -195,11 +231,11 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		return true;
 	}
 
-	return { run, runJson, ls, get, view, waitStarted, newAgent, newTab, closeTab };
+	return { run, runJson, ls, get, view, spaces, waitStarted, newAgent, newTab, closeTab };
 }
 
 const factory: CustomToolFactory = (pi: CustomToolAPI) => {
-	const { run, runJson, ls, get, view, newAgent } = herdrClient(pi.exec);
+	const { run, runJson, ls, get, view, spaces, newAgent } = herdrClient(pi.exec);
 
 	// hc interrupt presses the stop key (Esc in omp). omp reports working until the abort is done,
 	// and a dialog that appears instead must not get the text, so wait for idle or done.
@@ -243,41 +279,11 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_spaces",
 			label: "Herdr Spaces",
 			description:
-				"List open Herdr spaces (except the orchestrator's own), their tabs, and each terminal's app, state (idle|working|done|blocked|error, null for plain shells), turn, title, and cwd. Call this first to find the space that matches the user's request; match on space name and terminal cwd, not on folder.",
+				"List open Herdr spaces (except the orchestrator's own), their tabs, and each terminal's app, state (idle|working|done|blocked|error, null for plain shells), turn, title, and cwd. Each user request already comes with this list in a <herdr-spaces> message; call this only when that message is missing or you need a fresh view. Match on space name and terminal cwd, not on folder.",
 			loadMode: "essential",
 			parameters: pi.zod.object({}),
 			async execute(_id, _params, _onUpdate, _ctx, signal) {
-				const { spaces, selfSpace, hcId } = await view(signal);
-				const out = await Promise.all(
-					spaces
-						.filter(s => s !== selfSpace)
-						.map(async s => ({
-							id: s.id,
-							name: s.name,
-							tabs: await Promise.all(
-								s.tabs.map(async t => ({
-									id: t.id,
-									name: t.name,
-									terminals: await Promise.all(
-										t.terminals.map(async ({ terminal: id, app }) => {
-											const terminal = hcId(id);
-											// One dead terminal must not hide every other space.
-											const info = await get(terminal, signal).catch(() => undefined);
-											return {
-												terminal,
-												app: info?.status?.app ?? app ?? null,
-												state: info?.status?.state ?? null,
-												turn: info?.turn ?? null,
-												title: info?.title ?? null,
-												cwd: info?.foreground?.cwd ?? info?.cwd ?? null,
-											};
-										}),
-									),
-								})),
-							),
-						})),
-				);
-				return result({ self: { terminal: self ?? null, space: selfSpace?.id ?? null }, spaces: out });
+				return result(await spaces(signal));
 			},
 		},
 		{
