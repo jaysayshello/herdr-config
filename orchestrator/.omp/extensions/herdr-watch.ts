@@ -12,9 +12,11 @@ import * as path from "node:path";
 import { theme, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const START_MS = 60_000;
-// omp 18.18.9 stays working while a background job runs, but older builds reported done for a
-// moment before the job woke them. Workers keep the omp build they started with.
-const SETTLE_MS = 1_000;
+// Since omp 18.18.9 a worker stays working while its background job runs, so a stop is final and
+// needs no settle wait. Older builds reported done for a moment before the job woke them; every
+// worker now runs 18.20 or later (a worker keeps the build it started with). The check below
+// still reads the state once more after the stop.
+const SETTLE_MS = 0;
 const FOLLOW_MS = 10 * 60_000;
 const MAX_MS = 4 * 3_600_000;
 const ANSWER_MAX = 6_000;
