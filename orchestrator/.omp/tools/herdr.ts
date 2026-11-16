@@ -58,6 +58,41 @@ function result<T>(details: T) {
 	return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 }
 
+// herdr_send, herdr_new_agent and herdr_new_space take `watch` (the ~10-word summary) and start
+// the watch of extensions/herdr-watch.ts at once, which saves the model a herdr_watch call.
+// Custom tools get no pi.events, and omp loads each extension as a new module copy, so the
+// extension of the main session puts its starter on globalThis (shareWatch) for these tools.
+export type StartWatch = (terminal: string, afterTurn: number, prompt: string, signal?: AbortSignal) => Promise<object>;
+const WATCH_KEY = Symbol.for("herdr-watch:start");
+const watchHost = globalThis as unknown as Record<symbol, StartWatch | undefined>;
+
+// Returns the call that takes the starter away again (only if it is still this one).
+export function shareWatch(start: StartWatch): () => void {
+	watchHost[WATCH_KEY] = start;
+	return () => {
+		if (watchHost[WATCH_KEY] === start) delete watchHost[WATCH_KEY];
+	};
+}
+
+// The `watch` part of a send result: what herdr_watch returns, or why no watch started. A failed
+// watch must not fail a send that worked.
+async function startWatch(prompt: string | undefined, terminal: string, afterTurn: number, signal?: AbortSignal) {
+	if (!prompt?.trim()) return {};
+	const start = watchHost[WATCH_KEY];
+	const none = (why: string) => ({
+		watch: { watching: false, note: `No watch started: ${why}. Use the herdr-watcher fallback with after_turn ${afterTurn}.` },
+	});
+	if (!start) return none("the herdr-watch extension is not loaded");
+	try {
+		return { watch: await start(terminal, afterTurn, prompt, signal) };
+	} catch (err) {
+		return none(err instanceof Error ? err.message : String(err));
+	}
+}
+
+const WATCH_DOC =
+	"With watch (a summary of the request in about 10 words) it also starts herdr_watch on this terminal (after_turn: the turn of this send, or 0 for a new terminal), so do not call herdr_watch after it. The result then has watch: what herdr_watch returns (space_id for the More link), or watching false and a note when no watch started.";
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	if (signal?.aborted) {
@@ -290,12 +325,13 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_send",
 			label: "Herdr Send",
 			description:
-				"Send a task as a prompt to an omp session in another Herdr terminal. Use this when herdr_spaces shows a matching space with an omp terminal in state idle or done. Refuses other apps, busy terminals, and the orchestrator's own terminal. With interrupt: true it also takes a working terminal: only for a clear correction of the task that terminal runs now (new or related work goes to herdr_new_agent), it stops the turn (hc interrupt, as Esc does), waits until the terminal is idle or done, and sends the text after a note that tells the worker its turn was stopped and to clean up first. It never sends to a blocked terminal, with or without interrupt: a key press can answer its dialog. Waits up to 15 s for the prompt to start and throws a 'Prompt did not start' error if it does not; then use herdr_new_agent beside that terminal and do not send again. Returns the turn before the send (pass it to herdr_wait as after_turn) and interrupted: whether a turn was stopped.",
+				`Send a task as a prompt to an omp session in another Herdr terminal. Use this when herdr_spaces shows a matching space with an omp terminal in state idle or done. Refuses other apps, busy terminals, and the orchestrator's own terminal. With interrupt: true it also takes a working terminal: only for a clear correction of the task that terminal runs now (new or related work goes to herdr_new_agent), it stops the turn (hc interrupt, as Esc does), waits until the terminal is idle or done, and sends the text after a note that tells the worker its turn was stopped and to clean up first. It never sends to a blocked terminal, with or without interrupt: a key press can answer its dialog. Waits up to 15 s for the prompt to start and throws a 'Prompt did not start' error if it does not; then use herdr_new_agent beside that terminal and do not send again. Returns the turn before the send (pass it to herdr_wait as after_turn) and interrupted: whether a turn was stopped. ${WATCH_DOC}`,
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				terminal: pi.zod.string(),
 				text: pi.zod.string(),
 				interrupt: pi.zod.boolean().optional(),
+				watch: pi.zod.string().optional(),
 			}),
 			async execute(_id, params, _onUpdate, _ctx, signal) {
 				if (params.terminal === self) throw new Error("Refusing to send to the orchestrator's own terminal");
@@ -312,33 +348,37 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 					throw new Error(`Terminal ${params.terminal} is ${state ?? "unknown"}; send only when idle or done, pass interrupt: true only to correct its current task, or use herdr_new_agent`);
 				}
 				const text = interrupted ? `${STOPPED_NOTE}\n\n${params.text}` : params.text;
-				return result({ terminal: params.terminal, turn: await deliver(params.terminal, text, info, signal), interrupted });
+				const turn = await deliver(params.terminal, text, info, signal);
+				return result({ terminal: params.terminal, turn, interrupted, ...(await startWatch(params.watch, params.terminal, turn, signal)) });
 			},
 		},
 		{
 			name: "herdr_new_agent",
 			label: "Herdr New Agent",
 			description:
-				"Start another omp session beside an existing one, in the same Herdr space and the same tab, as Ctrl+E does (pane.split right). The pane of terminal `beside` splits, and omp starts there in the same folder with task as its first prompt (a real user prompt, so the `orchestrate` keyword works). The existing session keeps running and stays visible. Use this for every new session in an open space: another agent, a busy space, or a failed send. Waits up to 45 s for the first turn to start. Returns the new terminal and turn 0 for herdr_wait.",
+				`Start another omp session beside an existing one, in the same Herdr space and the same tab, as Ctrl+E does (pane.split right). The pane of terminal \`beside\` splits, and omp starts there in the same folder with task as its first prompt (a real user prompt, so the \`orchestrate\` keyword works). The existing session keeps running and stays visible. Use this for every new session in an open space: another agent, a busy space, or a failed send. Waits up to 45 s for the first turn to start. Returns the new terminal and turn 0 for herdr_wait. ${WATCH_DOC}`,
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				beside: pi.zod.string(),
 				task: pi.zod.string(),
+				watch: pi.zod.string().optional(),
 			}),
 			async execute(_id, params, _onUpdate, _ctx, signal) {
-				return result(await newAgent(params.beside, params.task, signal));
+				const started = await newAgent(params.beside, params.task, signal);
+				return result({ ...started, ...(await startWatch(params.watch, started.terminal, 0, signal)) });
 			},
 		},
 		{
 			name: "herdr_new_space",
 			label: "Herdr New Space",
 			description:
-				"Create a temporary Herdr space and start omp there with task as its first prompt. Use this only when no open space matches the request. name must match ^[a-z0-9-]+$; the tool adds the prefix tmp-. folder defaults to /tmp/herdr-orchestrator/<name> and is created if missing.",
+				`Create a temporary Herdr space and start omp there with task as its first prompt. Use this only when no open space matches the request. name must match ^[a-z0-9-]+$; the tool adds the prefix tmp-. folder defaults to /tmp/herdr-orchestrator/<name> and is created if missing. ${WATCH_DOC}`,
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				name: pi.zod.string(),
 				folder: pi.zod.string().optional(),
 				task: pi.zod.string(),
+				watch: pi.zod.string().optional(),
 			}),
 			async execute(_id, params, _onUpdate, _ctx, signal) {
 				if (!/^[a-z0-9-]+$/.test(params.name)) throw new Error(`Space name must match ^[a-z0-9-]+$: ${params.name}`);
@@ -352,7 +392,9 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 					["do", "space.new", "--name", name, "--folder", folder, "--argv", '["omp"]', "--task", params.task, ...(machine ? ["--machine", machine] : [])],
 					signal,
 				);
-				return result({ space: created.space, tab: created.tab, terminal: hcId(created.terminal) });
+				const terminal = hcId(created.terminal);
+				// omp has not started yet; the watch waits up to 60 s for its first turn.
+				return result({ space: created.space, tab: created.tab, terminal, ...(await startWatch(params.watch, terminal, 0, signal)) });
 			},
 		},
 		{

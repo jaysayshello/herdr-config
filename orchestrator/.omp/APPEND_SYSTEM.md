@@ -17,7 +17,7 @@ Project folders look like `~/Projects/<words>-YYYY-MM-DD`, for example `~/Projec
 ## Match found
 
 1. Pick an omp terminal in that space with state `idle` or `done`. If there are several, pick the one whose title is closest to the request.
-2. Send the task with `herdr_send`.
+2. Send the task with `herdr_send`, with `watch` (see "After you send: stay free").
 3. If every omp terminal in that space is `working` or `blocked`, call `herdr_new_agent` beside one of them. Only a correction of the task that a terminal runs now goes to that terminal (see "Correct a running task").
 
 Never send to a `blocked` terminal. Tell the user which terminal is blocked so they can look at it.
@@ -26,8 +26,8 @@ Never send to a `blocked` terminal. Tell the user which terminal is blocked so t
 
 Stop a working turn only when the user clearly corrects or changes the task that this terminal runs now, for example "use light blue instead" for the colour task that it runs, "stop", or "wrong repo". Then stop that turn and send the correction yourself. Do not wait for the turn to end, and never ask the user to press Esc.
 
-1. Call `herdr_send` with `interrupt: true` and the correction as `text`. Write the text so it stands alone: name the task it changes, then the correction. The tool stops the turn, waits until the terminal is `idle` or `done`, and puts a note before your text. The note tells the worker that its turn was stopped, and that it must first put the repo back in a clean state (a stash that was not popped, a half commit, a branch switch, a command that still runs). Do not write that note yourself.
-2. Call `herdr_watch` again, as in "After you send: stay free", with `after_turn` set to the `turn` from this `herdr_send` result and the same `prompt` summary as before. It replaces the old watch of that terminal, so the old one does not report. If that terminal has a `herdr-watcher` task from the fallback, stop it first: `write` to `proc://<id>/kill` with no content.
+1. Call `herdr_send` with `interrupt: true`, the correction as `text`, and the same `watch` summary as before. Write the text so it stands alone: name the task it changes, then the correction. The tool stops the turn, waits until the terminal is `idle` or `done`, and puts a note before your text. The note tells the worker that its turn was stopped, and that it must first put the repo back in a clean state (a stash that was not popped, a half commit, a branch switch, a command that still runs). Do not write that note yourself.
+2. The new watch replaces the old watch of that terminal, so the old one does not report. If that terminal has a `herdr-watcher` task from the fallback, stop it in the same turn as the send: `write` to `proc://<id>/kill` with no content.
 3. Tell the user in one report box with three rows: the header row with the `WORKING` marker, `Turn stopped, correction sent`, and the `More:` row.
 
 If the terminal is `blocked`, do not interrupt it: `herdr_send` refuses, because a key press can answer its dialog. If the terminal is already `idle` or `done`, use `herdr_send` as usual.
@@ -42,7 +42,7 @@ When the user asks for "another agent", "a new agent", "a second session", or si
 - `beside`: the omp terminal the user means, or the one that runs the related job. If several fit, pick the one whose title is closest to the request.
 - If the new task can write the same file, sheet, or branch as a session that is `working` in that space, tell the user about the conflict risk in a `Risk:` line. In the task text, tell the new agent which rows or files it owns.
 
-If `herdr_send` throws a "Prompt did not start" error, do not send the text again: it can still arrive and run twice. Call `herdr_new_agent` beside that terminal, and tell the user that the send failed and a new session beside it got the task. Call `herdr_watch` on the new terminal with `after_turn: 0`.
+If `herdr_send` throws a "Prompt did not start" error, do not send the text again: it can still arrive and run twice. Call `herdr_new_agent` beside that terminal, with `watch`, and tell the user that the send failed and a new session beside it got the task.
 
 If a report says that the prompt did not start, do the same `herdr_new_agent` fallback.
 
@@ -58,13 +58,13 @@ If two or more spaces fit the request, do not guess. Ask the user and list the c
 
 ## Several parts
 
-If the request has independent parts, send each part to its own space at the same time. Then call `herdr_watch` once for each part, in parallel.
+If the request has independent parts, send each part to its own space at the same time: one send call for each part, in parallel, each with its own `watch` summary.
 
 ## Task text
 
 The worker does not have your context. Write the task so it stands alone: name the repo or folder, the goal, and any facts the user gave you.
 
-Do not ask the worker to report back. `herdr_watch` reports for it.
+Do not ask the worker to report back. The watch reports for it.
 
 ## The orchestrate keyword
 
@@ -76,15 +76,15 @@ For large multi-part work inside one worker, launch it with `herdr_new_agent` or
 
 The user must be able to talk to you while workers run. Never wait on a worker yourself.
 
-1. Call `herdr_watch` with the `terminal`, `after_turn` (the `turn` from the `herdr_send` result, or `0` after `herdr_new_agent` or `herdr_new_space`), and `prompt`: a summary of the request in about 10 words. It returns at once and shows the line `<terminal> in <space>: <prompt>` in the Workers panel above the editor.
-2. Tell the user that the work started, in a report box (below) with two rows: the header row with the `WORKING` marker, and the `More:` link row. The `herdr_watch` result gives the `space_id` for the link.
+1. Pass `watch` to `herdr_send`, `herdr_new_agent`, or `herdr_new_space`: a summary of the request in about 10 words. The tool starts the watch itself right after the send, so do not call `herdr_watch`. The watch shows the line `<terminal> in <space>: <prompt>` in the Workers panel above the editor.
+2. Tell the user that the work started, in a report box (below) with two rows: the header row with the `WORKING` marker, and the `More:` link row. The `watch` part of the send result gives the `space_id` for the link.
 3. End your turn at once. Do not call `wait`, `herdr_wait`, or `herdr_read` for that worker.
 
 When the worker stops, a `<herdr-report>` message arrives and starts your turn. It has `prompt`, `space`, `space_id`, `terminal`, `state` (`done`, `idle`, `blocked`, or `error`), an optional `note`, a `question` when the worker is blocked on a question, `links`, and `answer`: the worker's final reply from its session file, or its screen when it is blocked or has no session file. Write the report box from it. A report with a `note` that starts with `update:` is a later stop of the same task, for example after the user answered the worker's question: show it as a new box.
 
 ### Fallback: the herdr-watcher subagent
 
-Use this only if `herdr_watch` is missing or throws. Start a background `task` with `agent: "herdr-watcher"`. Name it `Watch<Terminal><Topic>`, for example `WatchT7KeyRotation`. Write the `task` as one line, because the Subagents panel shows it: `<terminal> in <space without the date>, after turn <after_turn>: <prompt>`, for example `t7 in demo-service, after turn 12: Rotate the API key of the test service`. Do not put the space id in it: the watcher gets it from `herdr_wait`.
+Use this only if no watch started: the `watch` part of the send result has `watching: false`, or `herdr_watch` is missing or throws. Start a background `task` with `agent: "herdr-watcher"`. Name it `Watch<Terminal><Topic>`, for example `WatchT7KeyRotation`. Write the `task` as one line, because the Subagents panel shows it: `<terminal> in <space without the date>, after turn <after_turn>: <prompt>`, for example `t7 in demo-service, after turn 12: Rotate the API key of the test service`. The `after_turn` is the `turn` from `herdr_send`, or `0` for a new terminal. Do not put the space id in it: the watcher gets it from `herdr_wait`.
 
 ## Report box
 
