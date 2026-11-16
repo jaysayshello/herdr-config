@@ -44,6 +44,41 @@ async function gql(query, vars = {}) {
   return JSON.parse(r.stdout).data;
 }
 
+// The follow-up reads after a poll (comments, code owner checks) run this many at a time.
+const AT_ONCE = 4;
+
+// Runs at most `n` jobs (async functions) at once; the rest wait in line, first come first served.
+// Returns a function that queues one job and resolves or rejects as that job does.
+function limiter(n) {
+  let busy = 0;
+  const line = [];
+  const next = () => {
+    if (busy >= n || !line.length) return;
+    const [job, ok, fail] = line.shift();
+    busy++;
+    job().then(ok, fail).finally(() => {
+      busy--;
+      next();
+    });
+  };
+  return (job) => new Promise((ok, fail) => {
+    line.push([job, ok, fail]);
+    next();
+  });
+}
+
+// `gql`, except that a read already on its way is shared, not asked again: two code owner checks
+// that run at once and need the same team then make one gh call, as they did one after another
+// (the second found the team in owners.js's cache).
+function sharedReads(gql) {
+  const going = new Map();
+  return (query, vars = {}) => {
+    const key = JSON.stringify([query, vars]);
+    if (!going.has(key)) going.set(key, gql(query, vars).finally(() => going.delete(key)));
+    return going.get(key);
+  };
+}
+
 // statusCheckRollup.state: SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, or none (no checks).
 const CI = { SUCCESS: "passed", FAILURE: "failed", ERROR: "failed", PENDING: "running", EXPECTED: "running" };
 // The frame of a pull request that is ready to merge.
@@ -92,6 +127,12 @@ export default class PullRequests extends View {
     this.methods = new Map();
     // url -> { key, list } of people's comments (see checkComments); url -> ISO time of the last open.
     this.comments = new Map();
+    // The follow-up reads of each poll: at most AT_ONCE at a time, shared when the same, and the
+    // names ("comments <url>", "approval <url>") of the ones queued or running, so a refresh in
+    // the middle of a poll never starts a second one for the same pull request.
+    this.slot = limiter(AT_ONCE);
+    this.read = sharedReads(gql);
+    this.checking = new Set();
     this.seen = JSON.parse(localStorage.getItem("seen") ?? "{}");
     // The keyboard row: a pull request's url, while this list holds the keyboard; `back` is the
     // pane that had it before.
@@ -295,22 +336,35 @@ export default class PullRequests extends View {
       this.manual = false;
       cx.notify();
     }
-    if (!this.error) await this.checkApprovals(cx);
-    if (!this.error) await this.checkComments(cx);
+    // Both kinds share AT_ONCE slots; the code owner checks go in line first, as they ran first.
+    if (!this.error) await Promise.all([this.checkApprovals(cx), this.checkComments(cx)]);
+  }
+
+  // Runs `job` in a follow-up slot, unless the job of that name is already queued or running.
+  async once(name, job) {
+    if (this.checking.has(name)) return;
+    this.checking.add(name);
+    try {
+      await this.slot(job);
+    } finally {
+      this.checking.delete(name);
+    }
   }
 
   // Reads a pull request's comments again only when GitHub's updatedAt for it changed.
   async checkComments(cx) {
     let changed = false;
-    for (const p of this.prs ?? []) {
-      if (this.comments.get(p.url)?.key === p.updated) continue;
-      try {
-        this.comments.set(p.url, { key: p.updated, list: await fetchComments(gql, p.fullRepo, p.number, p.author) });
-        changed = true;
-      } catch (e) {
-        // Keep the last list; the next change of updatedAt tries again.
-      }
-    }
+    await Promise.all((this.prs ?? []).map((p) => {
+      if (this.comments.get(p.url)?.key === p.updated) return null;
+      return this.once(`comments ${p.url}`, async () => {
+        try {
+          this.comments.set(p.url, { key: p.updated, list: await fetchComments(this.read, p.fullRepo, p.number, p.author) });
+          changed = true;
+        } catch (e) {
+          // Keep the last list; the next change of updatedAt tries again.
+        }
+      });
+    }));
     if (changed) cx.notify();
   }
 
@@ -337,20 +391,22 @@ export default class PullRequests extends View {
   // commit, base, reviews or review decision changed (owners.js keeps team members 30 minutes).
   async checkApprovals(cx) {
     let changed = false;
-    for (const p of this.prs ?? []) {
+    await Promise.all((this.prs ?? []).map((p) => {
       const approvers = (p.reviews ?? []).filter((v) => v.state === "APPROVED" && v.login !== p.author);
-      if (!approvers.length) continue;
+      if (!approvers.length) return null;
       const key = JSON.stringify([p.head, p.base, p.decision, p.reviews]);
-      if (this.approvals.get(p.url)?.key === key) continue;
-      let result;
-      try {
-        result = await checkCodeOwners(gql, { repo: p.fullRepo, number: p.number, base: p.base, author: p.author, reviews: p.reviews });
-      } catch (e) {
-        result = { error: String(e.message ?? e) };
-      }
-      this.approvals.set(p.url, { key, result });
-      changed = true;
-    }
+      if (this.approvals.get(p.url)?.key === key) return null;
+      return this.once(`approval ${p.url}`, async () => {
+        let result;
+        try {
+          result = await checkCodeOwners(this.read, { repo: p.fullRepo, number: p.number, base: p.base, author: p.author, reviews: p.reviews });
+        } catch (e) {
+          result = { error: String(e.message ?? e) };
+        }
+        this.approvals.set(p.url, { key, result });
+        changed = true;
+      });
+    }));
     if (changed) cx.notify();
   }
 
