@@ -19,6 +19,7 @@
 // dim when you saw them all. Opening the PR (click or Enter) marks them seen.
 // Merged: your last 20 merged pull requests (not closed ones), newest merge first, with the merge
 // time in Eastern time. The same query fetches them, so a poll stays one call (cost 1 point).
+// Pull requests in archived repos do not show: GitHub permits no change to them, not even a close.
 // Headers fold their group on a click or `t3-prs.fold:<ready|draft|merged>`; folds are kept.
 
 import { View, div, svg } from "gpui-kit";
@@ -29,11 +30,11 @@ import { fetchComments, summarize } from "./comments.js";
 
 const EVERY = 5000;
 const QUERY = `{ viewer { pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
-  nodes { number title isDraft url headRefOid baseRefName reviewDecision mergeable mergeStateStatus updatedAt author { login } repository { name nameWithOwner }
+  nodes { number title isDraft url headRefOid baseRefName reviewDecision mergeable mergeStateStatus updatedAt author { login } repository { name nameWithOwner isArchived }
     latestReviews(first: 20) { nodes { state author { login } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
   merged: pullRequests(states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
-    nodes { number title url mergedAt repository { name } } } } }`;
+    nodes { number title url mergedAt repository { name isArchived } } } } }`;
 
 // GitHub GraphQL through gh: `data`, or an error with gh's message.
 async function gql(query, vars = {}) {
@@ -303,9 +304,10 @@ export default class PullRequests extends View {
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh exited with ${r.code}`);
       const viewer = JSON.parse(r.stdout).data.viewer;
       this.merged = viewer.merged.nodes
+        .filter((p) => !p.repository.isArchived)
         .map((p) => ({ number: p.number, title: p.title, url: p.url, repo: p.repository.name, mergedAt: p.mergedAt }))
         .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
-      this.prs = viewer.pullRequests.nodes.map((p) => ({
+      this.prs = viewer.pullRequests.nodes.filter((p) => !p.repository.isArchived).map((p) => ({
         number: p.number,
         title: p.title,
         draft: p.isDraft,

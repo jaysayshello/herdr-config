@@ -4,6 +4,7 @@
 // valid" when a click uses it later, so the fold showed only at the next unrelated redraw.
 // 2. Merge: the menu item shows only for a ready PR, the dialog comes first, the method follows
 // the repo, the head commit is pinned, and gh's error text reaches the toast.
+// 3. A poll drops PRs in archived repos (open and merged): GitHub refuses any change to them.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -204,4 +205,18 @@ const repoAllows = (allowed) => async (_cmd, args) => args[0] === "repo"
   assert.equal(ghCalls(["api", "graphql"]).length, 1, "still one GraphQL call per poll");
   assert.deepEqual([mod.prs[0].mergeable, mod.prs[0].mergeState, mod.prs[0].decision, mod.prs[0].head], ["MERGEABLE", "CLEAN", "APPROVED", HEAD]);
   console.log(`check-prs: merge passes (${cases.length} menu states)`);
+
+  // Archived repos: their open and merged PRs do not show; the other PRs do.
+  const archived = { name: "old", nameWithOwner: "example/old", isArchived: true };
+  const done = (number, repository) => ({ number, title: `PR ${number}`, url: `https://example.com/pull/${number}`,
+    mergedAt: "2026-11-15T00:00:00Z", repository });
+  host.exec = async (_cmd, args) => args[0] === "api"
+    ? { code: 0, stdout: JSON.stringify({ data: { viewer: {
+      pullRequests: { nodes: [node, { ...node, number: 8, isDraft: true, repository: archived }, { ...node, number: 9, isDraft: true }] },
+      merged: { nodes: [done(10, archived), done(11, node.repository)] } } } }), stderr: "" }
+    : { code: 1, stdout: "", stderr: "" };
+  await mod.load(scopedCx(), true);
+  assert.deepEqual(mod.prs.map((p) => p.number), [7, 9], "no open PR from an archived repo");
+  assert.deepEqual(mod.merged.map((p) => p.number), [11], "no merged PR from an archived repo");
+  console.log("check-prs: archived repos pass");
 })().catch((e) => { console.error(e); process.exit(1); });
