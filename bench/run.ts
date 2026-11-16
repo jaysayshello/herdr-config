@@ -24,6 +24,10 @@ const list = (name: string) => opt(name)?.split(",").filter(Boolean);
 // The code under test: this checkout, or another one (a clone on a branch to try), so the suite
 // itself need not be on that branch.
 const repo = path.resolve(opt("repo") ?? path.resolve(import.meta.dir, ".."));
+if (!fs.existsSync(path.join(repo, "herdr-app")) || !fs.existsSync(path.join(repo, "orchestrator"))) {
+	console.error(`bench: ${repo} is not a herdr-config checkout; pass --repo <checkout>`);
+	process.exit(1);
+}
 const runs = Number(opt("runs") ?? 5);
 const only = list("only");
 const skip = list("skip") ?? [];
