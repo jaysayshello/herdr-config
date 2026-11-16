@@ -168,9 +168,11 @@ export default function herdrReload(pi: ExtensionAPI) {
 			}
 			process.kill(pid, "SIGTERM");
 			const stopBy = Date.now() + STOP_MS;
-			while (alive(pid) && Date.now() < stopBy) await Bun.sleep(200);
+			// Check often (kill -0 costs nothing), so the new omp is typed soon after the old one ends.
+			// The terminal keeps what is typed until the shell reads it, so a short pause is enough.
+			while (alive(pid) && Date.now() < stopBy) await Bun.sleep(50);
 			if (alive(pid)) return { target: t, ok: false, note: "failed: omp did not stop in 15 s" };
-			await Bun.sleep(500);
+			await Bun.sleep(150);
 			// hc send types the text at once but then waits for a turn to start, which a shell never
 			// reports, so it can hang for seconds. Watch for omp while it runs; stop early if it fails.
 			const sent: { error?: string } = {};
