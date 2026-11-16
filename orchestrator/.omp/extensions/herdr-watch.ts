@@ -6,10 +6,15 @@
 // After a report it keeps watching: a blocked worker until it stops again, a done worker for
 // FOLLOW_MS, so a worker that wakes later for its own background job still reports. A new
 // herdr_watch on the same terminal replaces the old watch.
+//
+// herdr_send, herdr_new_agent and herdr_new_space start the same watch when they get `watch`, which
+// saves the orchestrator model one tool call per task: the main session shares its starter with
+// tools/herdr.ts (shareWatch).
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { theme, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { shareWatch, type StartWatch } from "../tools/herdr.ts";
 
 const START_MS = 60_000;
 // omp 18.18.9 stays working while a background job runs, but older builds reported done for a
@@ -267,10 +272,50 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		}
 	}
 
+	// Starts the watch of terminal, or replaces its old one. info is a fresh hc get of it. Returns
+	// what herdr_watch returns.
+	function begin(terminal: string, afterTurn: number, prompt: string, info: HcGet) {
+		watches.get(terminal)?.stop.abort();
+		const w: Watch = {
+			terminal,
+			afterTurn,
+			prompt: prompt.replace(/\s+/g, " ").trim(),
+			space: info.labels?.where?.split(" / ")[0] ?? "no space",
+			spaceId: info.labels?.["herdr.space"] ?? null,
+			phase: "starting",
+			stop: new AbortController(),
+		};
+		watches.set(w.terminal, w);
+		draw();
+		run(w)
+			.catch(err => {
+				if (!w.stop.signal.aborted)
+					send(w, "error", [`note: the watch failed: ${err instanceof Error ? err.message : String(err)}`]);
+			})
+			.finally(() => {
+				if (watches.get(w.terminal) === w) {
+					watches.delete(w.terminal);
+					draw();
+				}
+			});
+		return { terminal: w.terminal, space: w.space, space_id: w.spaceId, label: label(w), watching: true };
+	}
+
+	// For the send tools. They checked that the terminal runs omp, or just started omp there
+	// (herdr_new_space does not wait for it, so omp can be missing for a moment).
+	const startShared: StartWatch = async (terminal, afterTurn, prompt, signal) =>
+		begin(terminal, afterTurn, prompt, await get(terminal, signal ?? new AbortController().signal));
+	let unshare: (() => void) | undefined;
+
 	pi.on("session_start", (_event, ctx) => {
-		if (ctx.agent.kind === "main" && ctx.hasUI) ui = ctx.ui;
+		if (ctx.agent.kind !== "main") return;
+		if (ctx.hasUI) ui = ctx.ui;
+		unshare?.();
+		unshare = shareWatch(startShared);
 	});
 	pi.on("session_shutdown", () => {
+		unshare?.();
+		unshare = undefined;
 		for (const w of watches.values()) w.stop.abort();
 		watches.clear();
 	});
@@ -287,7 +332,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		name: "herdr_watch",
 		label: "Herdr Watch",
 		description:
-			"Watch one omp worker terminal after herdr_send, herdr_new_agent, or herdr_new_space, without a subagent. Returns at once. When the worker stops (done, idle, blocked on a question, or error), a <herdr-report> message with its final answer arrives in this session and starts a turn. It keeps watching: a blocked worker until it stops again, a done worker for 10 minutes in case it wakes for its own background job; each later stop sends another report marked update. A new herdr_watch on the same terminal replaces the old watch. after_turn is the turn from herdr_send, or 0 for a new terminal. prompt is a summary of the request in about 10 words; the Workers panel shows '<terminal> in <space>: <prompt>'.",
+			"Watch one omp worker terminal after herdr_send, herdr_new_agent, or herdr_new_space, without a subagent. Those tools start this watch themselves when they get `watch`; call herdr_watch only for a terminal they did not watch, such as a fix agent. Returns at once. When the worker stops (done, idle, blocked on a question, or error), a <herdr-report> message with its final answer arrives in this session and starts a turn. It keeps watching: a blocked worker until it stops again, a done worker for 10 minutes in case it wakes for its own background job; each later stop sends another report marked update. A new herdr_watch on the same terminal replaces the old watch. after_turn is the turn from herdr_send, or 0 for a new terminal. prompt is a summary of the request in about 10 words; the Workers panel shows '<terminal> in <space>: <prompt>'.",
 		loadMode: "essential",
 		parameters: pi.zod.object({
 			terminal: pi.zod.string(),
@@ -298,30 +343,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 			if (ctx.agent.kind === "main" && ctx.hasUI) ui = ctx.ui;
 			const info = await get(params.terminal, signal ?? new AbortController().signal);
 			if (info.status?.app !== "omp") throw new Error(`Terminal ${params.terminal} runs ${info.status?.app ?? "no agent"}, not omp`);
-			watches.get(params.terminal)?.stop.abort();
-			const w: Watch = {
-				terminal: params.terminal,
-				afterTurn: params.after_turn,
-				prompt: params.prompt.replace(/\s+/g, " ").trim(),
-				space: info.labels?.where?.split(" / ")[0] ?? "no space",
-				spaceId: info.labels?.["herdr.space"] ?? null,
-				phase: "starting",
-				stop: new AbortController(),
-			};
-			watches.set(w.terminal, w);
-			draw();
-			run(w)
-				.catch(err => {
-					if (!w.stop.signal.aborted)
-						send(w, "error", [`note: the watch failed: ${err instanceof Error ? err.message : String(err)}`]);
-				})
-				.finally(() => {
-					if (watches.get(w.terminal) === w) {
-						watches.delete(w.terminal);
-						draw();
-					}
-				});
-			const details = { terminal: w.terminal, space: w.space, space_id: w.spaceId, label: label(w), watching: true };
+			const details = begin(params.terminal, params.after_turn, params.prompt, info);
 			return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 		},
 	});
