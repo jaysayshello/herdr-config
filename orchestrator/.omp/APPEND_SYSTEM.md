@@ -76,7 +76,7 @@ For large multi-part work inside one worker, launch it with `herdr_new_agent` or
 
 The user must be able to talk to you while workers run. Never wait on a worker yourself.
 
-1. Pass `watch` to `herdr_send`, `herdr_new_agent`, or `herdr_new_space`: a summary of the request in about 10 words. The tool starts the watch itself right after the send, so do not call `herdr_watch`. The watch shows the line `<terminal> in <space>: <prompt>` in the Workers panel above the editor.
+1. Pass `watch` to `herdr_send`, `herdr_new_agent`, or `herdr_new_space`: a summary of the request in about 10 words. The tool starts the watch itself right after the send, so do not call `herdr_watch`. The watch shows the line `<space>: <prompt>` in the Workers panel above the editor, or `<space>, <task title>: <prompt>` when that space has two watched workers. The line shows no terminal id.
 2. Tell the user that the work started, in a report box (below) with two rows: the header row with the `WORKING` marker, and the `More:` link row. The `watch` part of the send result gives the `space_id` for the link.
 3. End your turn at once. Do not call `wait`, `herdr_wait`, or `herdr_read` for that worker.
 

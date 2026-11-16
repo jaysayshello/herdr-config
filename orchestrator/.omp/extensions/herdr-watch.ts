@@ -37,6 +37,7 @@ interface HcGet {
 	created_ms?: number;
 	status?: { app?: string; state?: string; kind?: string; msg?: string } | null;
 	labels?: Record<string, string>;
+	title?: string;
 }
 
 type Phase = "starting" | "working" | "blocked" | "following";
@@ -47,6 +48,8 @@ interface Watch {
 	prompt: string;
 	space: string;
 	spaceId: string | null;
+	// The task part of the terminal's Herdr title, for the panel line; it changes as omp names it.
+	title: string;
 	phase: Phase;
 	stop: AbortController;
 }
@@ -69,9 +72,20 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 	return promise;
 }
 
-// The panel line: "demo-service-2026-11-03" reads as "demo-service".
-const label = (w: Pick<Watch, "terminal" | "space" | "prompt">) =>
-	`${w.terminal} in ${w.space.replace(/-\d{4}-\d{2}-\d{2}$/, "")}: ${w.prompt}`;
+// The panel line names no terminal id, which means nothing to the user: "demo-service-2026-11-03"
+// reads as "demo-service", and a space with two watched workers adds each one's task title.
+function label(w: Watch, all: Iterable<Watch>): string {
+	const space = w.space.replace(/-\d{4}-\d{2}-\d{2}$/, "");
+	const shared = [...all].some(o => o !== w && o.space === w.space);
+	return `${space}${shared && w.title ? `, ${w.title}` : ""}: ${w.prompt}`;
+}
+
+// "π > MISP: Fix misp-modules image build" (omp puts an icon before the tag) -> "Fix misp-modules
+// image build". A title with no omp tag (a shell path) gives nothing.
+function shortTitle(title: string | undefined): string {
+	const m = title?.match(/\b[A-Z0-9]{2,}:\s*(.+)$/);
+	return m ? m[1].trim().split(/\s+/).slice(0, 4).join(" ") : "";
+}
 
 function links(text: string): string[] {
 	const found = text.match(/https?:\/\/[^\s<>()`"'|\]]+/g) ?? [];
@@ -141,7 +155,16 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		if (r.code !== 0) throw new Error(r.stderr || r.stdout || `hc ${args[0]} exited with code ${r.code}`);
 		return r.stdout;
 	}
-	const get = async (t: string, signal: AbortSignal) => JSON.parse(await hc(["get", t, "--json"], signal)) as HcGet;
+	const get = async (t: string, signal: AbortSignal) => {
+		const info = JSON.parse(await hc(["get", t, "--json"], signal)) as HcGet;
+		const w = watches.get(t);
+		const title = shortTitle(info.title);
+		if (w && title && title !== w.title) {
+			w.title = title;
+			draw();
+		}
+		return info;
+	};
 	const stateOf = (info: HcGet) => info.status?.state ?? "unknown";
 
 	function draw() {
@@ -158,7 +181,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 						? theme.fg("dim", "·")
 						: theme.fg("accent", "◌");
 			const note = { starting: "starting", working: "working", blocked: "waits for you", following: "reported" }[w.phase];
-			return ` └ ${mark} ${theme.fg(w.phase === "following" ? "muted" : "accent", label(w))}${theme.fg("dim", ` · ${note}`)}`;
+			return ` └ ${mark} ${theme.fg(w.phase === "following" ? "muted" : "accent", label(w, watches.values()))}${theme.fg("dim", ` · ${note}`)}`;
 		});
 		const reported = [...watches.values()].filter(w => w.phase === "following").length;
 		const counts = `${watches.size - reported} running${reported ? `, ${reported} reported` : ""}`;
@@ -284,6 +307,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 			prompt: prompt.replace(/\s+/g, " ").trim(),
 			space: info.labels?.where?.split(" / ")[0] ?? "no space",
 			spaceId: info.labels?.["herdr.space"] ?? null,
+			title: shortTitle(info.title),
 			phase: "starting",
 			stop: new AbortController(),
 		};
@@ -300,7 +324,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 					draw();
 				}
 			});
-		return { terminal: w.terminal, space: w.space, space_id: w.spaceId, label: label(w), watching: true };
+		return { terminal: w.terminal, space: w.space, space_id: w.spaceId, label: label(w, watches.values()), watching: true };
 	}
 
 	// For the send tools. They checked that the terminal runs omp, or just started omp there
@@ -334,7 +358,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		name: "herdr_watch",
 		label: "Herdr Watch",
 		description:
-			"Watch one omp worker terminal after herdr_send, herdr_new_agent, or herdr_new_space, without a subagent. Those tools start this watch themselves when they get `watch`; call herdr_watch only for a terminal they did not watch, such as a fix agent. Returns at once. When the worker stops (done, idle, blocked on a question, or error), a <herdr-report> message with its final answer arrives in this session and starts a turn. It keeps watching: a blocked worker until it stops again, a done worker for 10 minutes in case it wakes for its own background job; each later stop sends another report marked update. A new herdr_watch on the same terminal replaces the old watch. after_turn is the turn from herdr_send, or 0 for a new terminal. prompt is a summary of the request in about 10 words; the Workers panel shows '<terminal> in <space>: <prompt>'.",
+			"Watch one omp worker terminal after herdr_send, herdr_new_agent, or herdr_new_space, without a subagent. Those tools start this watch themselves when they get `watch`; call herdr_watch only for a terminal they did not watch, such as a fix agent. Returns at once. When the worker stops (done, idle, blocked on a question, or error), a <herdr-report> message with its final answer arrives in this session and starts a turn. It keeps watching: a blocked worker until it stops again, a done worker for 10 minutes in case it wakes for its own background job; each later stop sends another report marked update. A new herdr_watch on the same terminal replaces the old watch. after_turn is the turn from herdr_send, or 0 for a new terminal. prompt is a summary of the request in about 10 words; the Workers panel shows '<space>: <prompt>', or '<space>, <task title>: <prompt>' when that space has two watched workers.",
 		loadMode: "essential",
 		parameters: pi.zod.object({
 			terminal: pi.zod.string(),
