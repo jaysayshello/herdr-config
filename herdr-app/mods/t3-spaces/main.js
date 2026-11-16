@@ -63,6 +63,9 @@ const halo = (row) => div().relative().flex_none().my(GAP)
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
+// Places whose git is looked at together: enough that a start with many spaces
+// doesn't wait on them one by one, few enough not to swamp the machine.
+const GIT_AT_ONCE = 4;
 
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
@@ -74,6 +77,8 @@ export default class Spaces extends View {
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
     this.pending = new Set(); // where()s to look at next
+    this.looking = 0; // tasks looking at pending places now
+    this.inflight = new Set(); // where()s being looked at now
     this.busy = {}; // pane -> an agent working or a program in front of its shell
     this.ready = {}; // machine -> its layout was readable at the last look
     this.at = {}; // space -> its where() at the last look
@@ -92,6 +97,12 @@ export default class Spaces extends View {
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+    // Spaces arrive just after start (none are listed yet here): look at their git as soon
+    // as they are listed instead of on the first tick, so new rows wait less for it.
+    cx.spawn(async (cx) => {
+      for (let i = 0; i < 50 && !spaces().length; i++) await cx.sleep(20);
+      this.checkNew(cx);
+    });
   }
 
   checkNew(cx) {
@@ -150,22 +161,30 @@ export default class Spaces extends View {
     });
   }
 
-  // One look at a time, each place once however often it was asked for meanwhile.
+  // A few looks at a time, each place once however often it was asked for meanwhile,
+  // and never two looks at the same place at once (one asked for again while being
+  // looked at waits in `pending` for its look to end).
   refreshGit(keys, cx) {
     for (const k of keys) this.pending.add(k);
-    if (this.refreshing) return;
-    this.refreshing = true;
-    cx.spawn(async (cx) => {
-      while (this.pending.size) {
-        const keys = [...this.pending];
-        this.pending.clear();
-        for (const key of keys) await this.check(key, cx);
-      }
-      const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
-      for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
-      this.refreshing = false;
-      cx.notify();
-    });
+    // Counted before the task starts, so a second call right after this one sees it.
+    while (this.looking < GIT_AT_ONCE && this.looking < this.pending.size) {
+      this.looking++;
+      cx.spawn(async (cx) => {
+        for (;;) {
+          const key = [...this.pending].find((k) => !this.inflight.has(k));
+          if (key === undefined) break;
+          this.pending.delete(key);
+          this.inflight.add(key);
+          await this.check(key, cx);
+          this.inflight.delete(key);
+        }
+        // The last task to finish tidies up and redraws once, as one look used to.
+        if (--this.looking) return;
+        const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
+        for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
+        cx.notify();
+      });
+    }
   }
 
   // One place's git: branch, ahead/behind, its repo.
@@ -184,11 +203,11 @@ export default class Spaces extends View {
         return;
       }
       // The repo's own .git folder names it; a worktree's top differs from it.
-      const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
-      const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
-      const repo = common.stdout.trim();
+      // One command for both (the common dir first, so it is there even if the top fails).
+      const rp = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"], { cwd, on });
+      const [repo = "", top = ""] = rp.stdout.split("\n").map((l) => l.trim());
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
+      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top}/.git` };
       for (const line of r.stdout.split("\n")) {
         if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
