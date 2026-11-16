@@ -1,8 +1,17 @@
 // Small process and timing helpers. Every child gets the sandbox env that bench/run.sh set up
 // (HOME, HC_SESSION, HERDR_APP_HOME), so hc and herdr-app only ever reach the test core and window.
 
-// Wall clock in milliseconds, with sub-millisecond precision, comparable across processes.
-export const now = () => performance.timeOrigin + performance.now();
+// Wall clock in milliseconds, with sub-millisecond precision, comparable across processes (perl's
+// Time::HiRes in the fake scripts reads the same clock). performance.now() stops while the Mac
+// sleeps, so the base moves back to the wall clock whenever the two drift apart.
+let base = Date.now() - performance.now();
+export function now(): number {
+	const t = base + performance.now();
+	const wall = Date.now();
+	if (Math.abs(wall - t) < 50) return t;
+	base = wall - performance.now();
+	return wall;
+}
 
 export const sleep = Bun.sleep;
 

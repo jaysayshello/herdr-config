@@ -15,4 +15,6 @@ export HOME="$ROOT/h" HC_SESSION=herdrbench HERDR_APP_HOME="$ROOT/h/.config/herd
 export PATH="$HOME/.local/bin:$PATH"
 # The terminal this runs in belongs to the real core: its id must not reach the tools under test.
 unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE
-exec "$BUN" "$here/run.ts" "$@"
+# caffeinate keeps the Mac and its display awake for the run: a sleep stops the clocks the cases
+# compare, and Herdr does not draw while the display sleeps.
+exec /usr/bin/caffeinate -di "$BUN" "$here/run.ts" "$@"
