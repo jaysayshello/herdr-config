@@ -171,8 +171,13 @@ export default function herdrReload(pi: ExtensionAPI) {
 			while (alive(pid) && Date.now() < stopBy) await Bun.sleep(200);
 			if (alive(pid)) return { target: t, ok: false, note: "failed: omp did not stop in 15 s" };
 			await Bun.sleep(500);
-			await run("env", ["-u", "HC_TERMINAL_ID", "hc", "send", t.terminal, command]);
-			return backIn(t, t.terminal, pid);
+			// hc send types the text at once but then waits for a turn to start, which a shell never
+			// reports, so it can hang for seconds. Watch for omp while it runs; stop early if it fails.
+			const sent: { error?: string } = {};
+			run("env", ["-u", "HC_TERMINAL_ID", "hc", "send", t.terminal, command]).catch(e => {
+				sent.error = e instanceof Error ? e.message : String(e);
+			});
+			return backIn(t, t.terminal, pid, "", sent);
 		}
 
 		// The terminal ends with omp, and Herdr closes its pane. A pane split from it waits for the old
@@ -193,9 +198,10 @@ export default function herdrReload(pi: ExtensionAPI) {
 		return backIn(t, split.terminal, pid, ` as ${split.terminal}`);
 	}
 
-	async function backIn(t: Target, terminal: string, oldPid: number, suffix = ""): Promise<Outcome> {
+	async function backIn(t: Target, terminal: string, oldPid: number, suffix = "", sent?: { error?: string }): Promise<Outcome> {
 		const by = Date.now() + BACK_MS;
 		while (Date.now() < by) {
+			if (sent?.error) return { target: t, ok: false, note: `failed: hc send did not work: ${sent.error}` };
 			const info = await get(terminal).catch(() => undefined);
 			const state = info ? stateOf(info) : "unknown";
 			const fg = info?.foreground?.pid;
