@@ -49,7 +49,7 @@ function encodePs(script) {
   return out;
 }
 // Only your own open pull requests in repositories your account owns (`user:<you>`): organizations'
-// repos are left out (wealthsimple's IP allow list refuses this machine).
+// repos are left out (an organization's IP allow list can refuse this machine).
 const QUERY = `query($q: String!) { search(query: $q, type: ISSUE, first: 50) {
   nodes { ... on PullRequest { number title isDraft url headRefOid baseRefName reviewDecision mergeable mergeStateStatus updatedAt author { login } repository { name nameWithOwner }
     latestReviews(first: 20) { nodes { state author { login } } }
