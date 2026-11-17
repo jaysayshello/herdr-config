@@ -74,8 +74,9 @@ if (args[0] === "get") {
 	// A new terminal runs the app its argv starts, and has taken its first prompt.
 	const app = `${head}
 const argv = args.includes("--argv") ? JSON.parse(args[args.indexOf("--argv") + 1]) : [];
-// A Claude in a folder it does not trust yet shows a question and reports no state.
-const started = a => put("t9", fs.existsSync(path.join(dir, "untrusted")) ? { created_ms: 999, turn: 0, status: null, labels: { "herdr.space": "s9" } } : { created_ms: 999, turn: 1, status: { app: a, state: "working" }, labels: { "herdr.space": "s9" } });
+// A Claude in a folder it does not trust yet shows a question and reports no state. With the
+// claude-code flag, Claude reports as Claude Code does itself (app claude-code), not as our hook.
+const started = a => put("t9", fs.existsSync(path.join(dir, "untrusted")) ? { created_ms: 999, turn: 0, status: null, labels: { "herdr.space": "s9" } } : { created_ms: 999, turn: 1, status: { app: a === "claude" && fs.existsSync(path.join(dir, "claude-code")) ? "claude-code" : a, state: "working" }, labels: { "herdr.space": "s9" } });
 if (args[0] === "ls") process.stdout.write(fs.readFileSync(path.join(dir, "ls.json"), "utf8"));
 else if (args[0] === "do" && args[1] === "pane.split") {
 	started(/exec claude "\\$t"$/.test(argv[2]) ? "claude" : /exec omp "\\$t"$/.test(argv[2]) ? "omp" : "sh");
@@ -198,8 +199,24 @@ else if (args[0] === "do" && args[1] === "pane.split") {
 		expect(herdr.readMode()).toBe("omp");
 	});
 
+	test("agentTool maps Claude Code's own app name to claude", () => {
+		expect(herdr.agentTool("omp")).toBe("omp");
+		expect(herdr.agentTool("claude")).toBe("claude");
+		expect(herdr.agentTool("claude-code")).toBe("claude");
+		expect(herdr.agentTool("zsh")).toBeUndefined();
+		expect(herdr.agentTool(null)).toBeUndefined();
+	});
+
 	describe("herdr_send", () => {
 		test("sends to an idle claude terminal", async () => {
+			const out = await call("herdr_send", { terminal: "t1", text: "Fix the build" });
+			expect(out.details).toMatchObject({ terminal: "t1", turn: 0, interrupted: false });
+			expect(sends()).toEqual([["send", "--json", "t1", "Fix the build"]]);
+		});
+
+		test("sends to an idle terminal that reports app claude-code", async () => {
+			const t1 = JSON.parse(fs.readFileSync(path.join(fake, "terminals/t1.json"), "utf8"));
+			terminal("t1", { ...t1, status: { app: "claude-code", state: "idle" } });
 			const out = await call("herdr_send", { terminal: "t1", text: "Fix the build" });
 			expect(out.details).toMatchObject({ terminal: "t1", turn: 0, interrupted: false });
 			expect(sends()).toEqual([["send", "--json", "t1", "Fix the build"]]);
@@ -235,6 +252,14 @@ else if (args[0] === "do" && args[1] === "pane.split") {
 			expect(argv[2]).toEndWith('exec claude "$t"');
 			expect(flag(doCall("pane.split")!.args, "--pane")).toBe("p1");
 		});
+
+		test("herdr_new_agent in claude mode starts when Claude reports app claude-code", async () => {
+			setMode("claude\n");
+			fs.writeFileSync(path.join(fake, "claude-code"), "");
+			const out = await call("herdr_new_agent", { beside: "t1", task: "Write the docs" });
+			expect(out.details).toMatchObject({ terminal: "t9", turn: 0 });
+			expect(splitArgv()[2]).toEndWith('exec claude "$t"');
+		}, 10_000);
 
 		test("herdr_new_agent in omp mode runs omp", async () => {
 			const out = await call("herdr_new_agent", { beside: "t3", task: "Write the docs" });
@@ -353,6 +378,25 @@ else if (args[0] === "do" && args[1] === "pane.split") {
 
 			test("refuses a plain zsh terminal", async () => {
 				await expect(watchTool({ terminal: "t2", after_turn: 0, prompt: "x" })).rejects.toThrow("not omp or claude");
+			});
+		});
+
+		describe("herdr_watch of a claude-code terminal", () => {
+			const pi = fakePi();
+			watch.default(asPi(pi));
+			const ctx = { agent: { kind: "main" }, hasUI: false };
+			afterAll(() => pi.fire("session_shutdown"));
+
+			test("watches it and reports its answer from the Claude transcript", async () => {
+				writeTranscript();
+				crumb(111);
+				const t1 = JSON.parse(fs.readFileSync(path.join(fake, "terminals/t1.json"), "utf8"));
+				terminal("t1", { ...t1, turn: 1, status: { app: "claude-code", state: "working" } });
+				const out = await pi.tools.get("herdr_watch")!.execute("id", { terminal: "t1", after_turn: 0, prompt: "Fix the build" }, undefined, undefined, ctx);
+				expect(out.details).toMatchObject({ terminal: "t1", watching: true });
+				terminal("t1", { ...t1, turn: 1, status: { app: "claude-code", state: "done" } });
+				const report = await pi.report;
+				expect(report).toContain(`answer (session):\n${answer}`);
 			});
 		});
 	});

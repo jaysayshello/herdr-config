@@ -15,17 +15,27 @@
 #   "PreCompact":        [{"matcher": "", "hooks": [{"type": "command", "command": "sh ~/.claude/hooks/herdr-claude.sh", "timeout": 5}]}],
 #   "SessionEnd":        [{"matcher": "", "hooks": [{"type": "command", "command": "sh ~/.claude/hooks/herdr-claude.sh", "timeout": 5}]}]
 #
+# Reports app=claude-code, the same word Claude Code sends natively.
+# A claude nested in another claude or omp writes nothing: it inherits the
+# outer HC_TERMINAL_ID.
+#
 # Tests: HERDR_CLAUDE_HOOK_TTY=<file> writes the report there and skips the
 # Claude process checks.
+# Tests: HERDR_CLAUDE_HOOK_ANCESTORS="zsh login" replaces the ancestor comm walk.
 
 exec >/dev/null 2>&1
 
 set -f
 [ -n "$HC_TERMINAL_ID" ] || exit 0
-command -v jq >/dev/null || exit 0
+# The system jq first: a version-manager shim on PATH can take seconds to start, and the hook has 5 s.
+jq() { if [ -x /usr/bin/jq ]; then /usr/bin/jq "$@"; else command jq "$@"; fi; }
+[ -x /usr/bin/jq ] || command -v jq >/dev/null || exit 0
 
 if [ -n "$HERDR_CLAUDE_HOOK_TTY" ]; then
 	out=$HERDR_CLAUDE_HOOK_TTY
+	for c in $HERDR_CLAUDE_HOOK_ANCESTORS; do
+		case "$(basename "$c")" in claude | omp) exit 0 ;; esac
+	done
 else
 	# The hook may run under a sh -c, so walk up to the claude process.
 	pid=$PPID
@@ -45,6 +55,25 @@ else
 		n=$((n + 1))
 	done
 	[ -n "$claude" ] || exit 0
+	# A claude inside another claude or omp must not change the outer terminal.
+	if [ -n "$HERDR_CLAUDE_HOOK_ANCESTORS" ]; then
+		for c in $HERDR_CLAUDE_HOOK_ANCESTORS; do
+			case "$(basename "$c")" in claude | omp) exit 0 ;; esac
+		done
+	else
+		pid=$ppid
+		n=0
+		while [ "$n" -lt 12 ] && [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+			line=$(ps -o ppid=,comm= -p "$pid") || break
+			set -- $line
+			[ $# -ge 2 ] || break
+			ppid=$1
+			shift
+			case "$(basename "$*")" in claude | omp) exit 0 ;; esac
+			pid=$ppid
+			n=$((n + 1))
+		done
+	fi
 	# claude -p (for example started by omp) must not change this terminal. Only the args before
 	# ` -- ` count: the prompt after it can contain -p.
 	a=$(ps -o args= -p "$claude")
@@ -67,7 +96,7 @@ input=$(cat)
 event=$(printf '%s' "$input" | jq -r '.hook_event_name // empty')
 
 report() {
-	printf '\033]7501;state=%s:app=claude\007' "$1" >>"$out"
+	printf '\033]7501;state=%s:app=claude-code\007' "$1" >>"$out"
 }
 
 dir=$HOME/.local/state/claude-herdr-resume

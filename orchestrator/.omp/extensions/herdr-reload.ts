@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { agentTool } from "../tools/herdr.ts";
 
 const self = process.env.HC_TERMINAL_ID;
 // herdr-resume.ts writes this breadcrumb in each session: created_ms, then the session file.
@@ -125,7 +126,7 @@ export async function ompSessionFile(exec: Exec, t: Target, pid: number): Promis
 }
 
 // Every terminal of the caller's machine (or of the space `only`) that `match` takes.
-export async function targets(exec: Exec, only: string | undefined, match: (info: HcGet) => Promise<boolean>): Promise<Target[]> {
+export async function targets(exec: Exec, only: string | undefined, match: (info: HcGet, terminal: string) => Promise<boolean>): Promise<Target[]> {
 	const [{ spaces }, me] = await Promise.all([
 		runner(exec)("herdr-app", ["ls"]).then(out => JSON.parse(out) as { spaces: LsSpace[] }),
 		self ? hcGet(exec, self).catch(() => undefined) : undefined,
@@ -142,7 +143,7 @@ export async function targets(exec: Exec, only: string | undefined, match: (info
 			for (const term of tab.terminals) {
 				const terminal = machine && term.terminal.startsWith(`${machine}/`) ? term.terminal.slice(machine.length + 1) : term.terminal;
 				const info = await hcGet(exec, terminal).catch(() => undefined);
-				if (info && (await match(info))) found.push({ terminal, pane: term.pane, space: s.name, own: s === mine, info });
+				if (info && (await match(info, terminal))) found.push({ terminal, pane: term.pane, space: s.name, own: s === mine, info });
 			}
 	}
 	return found;
@@ -182,8 +183,8 @@ export async function splitPane(exec: Exec, pane: string, script: string, args: 
 }
 
 export interface Expect {
-	// status.app and the process name of the tool that must come up.
-	app: string;
+	// The tool (agentTool of status.app: Claude reports `claude` or `claude-code`) and its process name.
+	app: "omp" | "claude";
 	name: string;
 	states: string[];
 	// Outcome words: "restarted", and "omp did not come back".
@@ -208,7 +209,7 @@ export async function backIn(
 		const state = info ? stateOf(info) : "unknown";
 		const fg = info?.foreground?.pid;
 		const pid = fg ? await toolPid(exec, fg, want.name) : undefined;
-		if (pid && pid !== oldPid && info?.status?.app === want.app && want.states.includes(state)) return { target: t, ok: true, note: `${want.ok}${suffix}` };
+		if (pid && pid !== oldPid && agentTool(info?.status?.app) === want.app && want.states.includes(state)) return { target: t, ok: true, note: `${want.ok}${suffix}` };
 		await Bun.sleep(500);
 	}
 	return { target: t, ok: false, note: `failed: ${want.late} in 60 s${suffix}, look at ${terminal}` };
@@ -271,7 +272,7 @@ export default function herdrReload(pi: ExtensionAPI) {
 			// hc keeps the last omp status after omp ends, so a plain shell can still read as omp.
 			const all = await targets(exec, only, async info => {
 				const fg = info.foreground?.pid;
-				return info.status?.app === "omp" && !!fg && !!(await toolPid(exec, fg, "omp"));
+				return agentTool(info.status?.app) === "omp" && !!fg && !!(await toolPid(exec, fg, "omp"));
 			});
 			if (all.length === 0) {
 				ctx.ui.notify(only ? `/reload: no omp session in a space named ${only}` : "/reload: no omp sessions found", "warning");

@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { trustFolder } from "../lib/claude-trust.ts";
 import { buildHandoff, firstPrompt, sessionPoint, type Tool, writeHandoff } from "../lib/handoff.ts";
+import { agentTool } from "../tools/herdr.ts";
 import {
 	backIn,
 	crumbFile,
@@ -125,6 +126,15 @@ function moveTo(from: Tool, oldId: string, newId: string, createdMs: number, rec
 	} catch {}
 }
 
+// The tool whose session a terminal last held, from a breadcrumb with no quit mark: the tool ended
+// without a switch or a quit (killed, crashed), and only a shell runs there now.
+function stoppedTool(terminal: string, createdMs: number | undefined): Tool | undefined {
+	for (const tool of ["omp", "claude"] as const)
+		if (crumbFile(CRUMBS[tool], terminal, createdMs) && fs.readFileSync(path.join(CRUMBS[tool], terminal), "utf8").split("\n")[2] !== "quit")
+			return tool;
+	return undefined;
+}
+
 export default function herdrSwitch(pi: ExtensionAPI) {
 	const exec: Exec = (cmd, args) => pi.exec(cmd, args);
 
@@ -141,7 +151,7 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 		const info = await hcGet(exec, t.terminal);
 		t.info = info;
 		// A Claude that started before the hook was installed never reports a state.
-		if (info.status?.app !== from) return skip("no state");
+		if (agentTool(info.status?.app) !== from) return skip("no state");
 		const state = stateOf(info);
 		if (state !== "idle" && state !== "done") return skip(state === "unknown" ? "no state" : state);
 		const fg = info.foreground?.pid;
@@ -201,7 +211,7 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 		const nowState = now ? stateOf(now) : "unknown";
 		const nowFg = now?.foreground?.pid;
 		const nowPid = nowFg ? await toolPid(exec, nowFg, from) : undefined;
-		if (now?.status?.app !== from || (nowState !== "idle" && nowState !== "done") || nowPid !== pid) {
+		if (agentTool(now?.status?.app) !== from || (nowState !== "idle" && nowState !== "done") || nowPid !== pid) {
 			fs.rmSync(handoffPath, { force: true });
 			return skip(nowPid === pid ? `became ${nowState}` : "the process changed");
 		}
@@ -251,17 +261,26 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 
 		const only = args.trim() || undefined;
 		// For omp, the omp state and an omp process (hc keeps the last omp state after omp ends). For
-		// Claude, any claude process: one with no state shows in the report as skipped.
-		const all = await targets(exec, only, async info => {
+		// Claude, any claude process: one with no state shows in the report as skipped. A terminal with
+		// no omp or claude process but the breadcrumb of a session that did not quit goes in the report
+		// too, so a killed tool does not go out of sight.
+		const stopped = new Map<string, Tool>();
+		const found = await targets(exec, only, async (info, terminal) => {
 			const fg = info.foreground?.pid;
-			if (!fg || (from === "omp" && info.status?.app !== "omp")) return false;
-			return !!(await toolPid(exec, fg, from));
+			const pid = fg ? await toolPid(exec, fg, from) : undefined;
+			if (pid) return from === "claude" || agentTool(info.status?.app) === "omp";
+			if (fg && (await toolPid(exec, fg, from === "omp" ? "claude" : "omp"))) return false;
+			const tool = stoppedTool(terminal, info.created_ms);
+			if (tool) stopped.set(terminal, tool);
+			return !!tool;
 		});
-		if (all.length === 0) {
+		const all = found.filter(t => !stopped.has(t.terminal));
+		const dead = found.filter(t => stopped.has(t.terminal) && t.terminal !== self && !t.own && t.space !== "reviewers");
+		if (all.length === 0 && dead.length === 0) {
 			ctx.ui.notify(only ? `${name}: no ${from} terminal in a space named ${only}` : `${name}: no ${from} terminals found`, "warning");
 			return;
 		}
-		ctx.ui.notify(`${name}: switching ${all.length} ${from} terminals to ${NAMES[to]}`, "info");
+		if (all.length) ctx.ui.notify(`${name}: switching ${all.length} ${from} terminals to ${NAMES[to]}`, "info");
 
 		const outcomes: (Outcome & { now?: string })[] = [];
 		const queue = [...all];
@@ -271,6 +290,8 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 					outcomes.push(await switchOne(t, from, to).catch(err => ({ target: t!, ok: false, note: `failed: ${String(err)}` })));
 			}),
 		);
+		for (const t of dead)
+			outcomes.push({ target: t, ok: false, note: `skipped: no agent runs; its ${NAMES[stopped.get(t.terminal)!]} session stopped (type omp or claude there to resume it)` });
 
 		const line = (o: Outcome & { now?: string }) =>
 			`- ${o.target.terminal}${o.now ? ` -> ${o.now}` : ""} (${o.target.space.replace(/-\d{4}-\d{2}-\d{2}$/, "")}): ${o.note}`;

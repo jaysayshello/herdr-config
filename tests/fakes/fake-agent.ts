@@ -7,7 +7,8 @@
 //     real tool reads them, and adds the first prompt to it,
 //   - writes its breadcrumb (claude: through the hook in the Claude config folder,
 //     hooks/herdr-claude.sh, with a SessionStart input; directly when the hook wrote none),
-//   - reports `state=$FAKE_AGENT_STATE` (default idle) with OSC 7501, and ends on SIGTERM,
+//   - reports `state=$FAKE_AGENT_STATE` (default idle) with OSC 7501, and ends on SIGTERM; claude
+//     reports `app=claude`, or `app=claude-code` (as Claude Code itself) when FAKE_AGENT_APP=claude-code,
 //   - claude only: in a folder that the Claude config does not trust, shows the trust question instead.
 import { spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -140,7 +141,8 @@ if (name === "claude" && !trusted()) {
 	const session = name === "omp" ? ompSession() : claudeSession();
 	fs.appendFileSync(process.env.FAKE_AGENT_LOG ?? path.join(os.homedir(), "fake-agent.log"), `${JSON.stringify({ name, terminal, pid: process.pid, cwd, argv, session })}\n`);
 	if (name === "omp") process.stdout.write(`\x1b]2;${process.env.FAKE_AGENT_TITLE ?? "π > FAKE: switch test task"}\x07`);
-	process.stdout.write(`\x1b]7501;state=${process.env.FAKE_AGENT_STATE ?? "idle"}:app=${name}\x07fake ${name} ready\n`);
+	const app = name === "claude" && process.env.FAKE_AGENT_APP === "claude-code" ? "claude-code" : name;
+	process.stdout.write(`\x1b]7501;state=${process.env.FAKE_AGENT_STATE ?? "idle"}:app=${app}\x07fake ${name} ready\n`);
 	for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const)
 		process.on(sig, () => {
 			// The real omp adds an entry when it ends; a switch back must still see the session where it left it.

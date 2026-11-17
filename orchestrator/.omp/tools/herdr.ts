@@ -60,9 +60,14 @@ function result<T>(details: T) {
 
 // The programs a worker terminal can run. /claude and /omp (extensions/herdr-switch.ts) write the
 // mode file, and new workers start in that mode. The PR fix agents of herdr-pr-autofix.ts stay omp.
-export const AGENT_APPS = ["omp", "claude"] as const;
-export type AgentApp = (typeof AGENT_APPS)[number];
-export const isAgentApp = (app: string | undefined): app is AgentApp => AGENT_APPS.includes(app as AgentApp);
+export type AgentApp = "omp" | "claude";
+// The tool a terminal's status app names. Our hook reports `claude`; Claude Code itself reports
+// `claude-code`.
+export function agentTool(app: string | null | undefined): "omp" | "claude" | undefined {
+	if (app === "omp") return "omp";
+	if (app === "claude" || app === "claude-code") return "claude";
+	return undefined;
+}
 
 // A missing or unknown mode file means omp.
 export function readMode(): AgentApp {
@@ -212,9 +217,10 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		for (;;) {
 			const info = await get(terminal, signal).catch(() => ({}) as HcGet);
 			const state = info.status?.state;
-			if (info.status?.app === app && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
+			const tool = agentTool(info.status?.app);
+			if (tool === app && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
 			// Claude asks once per folder if it can trust it, and reports no state before the answer.
-			if (app === "claude" && info.status?.app !== "claude" && Date.now() - screenAt >= 1000) {
+			if (app === "claude" && tool !== "claude" && Date.now() - screenAt >= 1000) {
 				screenAt = Date.now();
 				const screen = await run("hc", ["read", terminal, "--lines", "40"], signal).catch(() => "");
 				if (/trust this folder/i.test(screen))
@@ -371,7 +377,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 				let info = await get(params.terminal, signal);
 				const app = info.status?.app;
 				const state = info.status?.state;
-				if (!isAgentApp(app)) throw new Error(`Terminal ${params.terminal} runs ${app ?? "no agent"}, not omp or claude`);
+				if (!agentTool(app)) throw new Error(`Terminal ${params.terminal} runs ${app ?? "no agent"}, not omp or claude`);
 				if (state === "blocked") {
 					throw new Error(`Terminal ${params.terminal} is blocked on a dialog; never send or interrupt there, tell the user to look at it`);
 				}
