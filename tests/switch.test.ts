@@ -18,6 +18,7 @@ const LONG = 240_000;
 
 interface HcGet {
 	argv?: string[];
+	pid?: number;
 	created_ms?: number;
 	cwd?: string;
 	title?: string;
@@ -59,7 +60,7 @@ const ELSEWHERE = "/elsewhere/not-this-folder";
 const firstConfig = JSON.stringify({ numStartups: 7, projects: { [ELSEWHERE]: { allowedTools: ["Bash"], hasTrustDialogAccepted: false } } }, null, 2);
 const config = () => JSON.parse(fs.readFileSync(claudeJson, "utf8"));
 let reload: {
-	toolPid(exec: unknown, fg: number, name: string): Promise<number | undefined>;
+	toolPid(exec: unknown, fg: number, name: string, root?: number): Promise<number | undefined>;
 	shellStays(argv: string[]): boolean;
 	OMP_CRUMBS: string;
 };
@@ -403,7 +404,7 @@ test(
 	"/claude skips a terminal when the Claude config does not parse, and leaves omp and the file as they were",
 	async () => {
 		const t = await ompSpace("tmp-switch-broken", sb.work("switch-broken"));
-		const pid = (await get(t)).foreground?.pid;
+		const pid = last("omp", t)!.pid;
 		const good = fs.readFileSync(claudeJson, "utf8");
 		fs.writeFileSync(claudeJson, "{ not json");
 		try {
@@ -413,7 +414,8 @@ test(
 			expect(fs.readFileSync(claudeJson, "utf8")).toBe("{ not json");
 			const info = await get(t);
 			expect(info.status?.app).toBe("omp");
-			expect(info.foreground?.pid).toBe(pid);
+			// The same omp still runs (the raw foreground pid can be a short child of the shell or omp).
+			expect(await reload.toolPid(exec, info.foreground!.pid!, "omp", info.pid)).toBe(pid);
 		} finally {
 			fs.writeFileSync(claudeJson, good);
 		}

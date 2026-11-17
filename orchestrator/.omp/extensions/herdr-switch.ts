@@ -154,8 +154,8 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 		if (agentTool(info.status?.app) !== from) return skip("no state");
 		const state = stateOf(info);
 		if (state !== "idle" && state !== "done") return skip(state === "unknown" ? "no state" : state);
-		const fg = info.foreground?.pid;
-		const pid = fg ? await toolPid(exec, fg, from) : undefined;
+		const fg = info.foreground?.pid ?? info.pid;
+		const pid = fg ? await toolPid(exec, fg, from, info.pid) : undefined;
 		if (!pid) return skip(`no ${from} process found`);
 		// SIGTERM would end a background job too. omp has no background job while idle or done (since
 		// omp 18.18.9 it reports working until its jobs end); Claude's run as a shell under it.
@@ -209,8 +209,8 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 		// The terminal can turn busy while the handoff is built; the stop below would end its work.
 		const now = await hcGet(exec, t.terminal).catch(() => undefined);
 		const nowState = now ? stateOf(now) : "unknown";
-		const nowFg = now?.foreground?.pid;
-		const nowPid = nowFg ? await toolPid(exec, nowFg, from) : undefined;
+		const nowFg = now?.foreground?.pid ?? now?.pid;
+		const nowPid = nowFg ? await toolPid(exec, nowFg, from, now?.pid) : undefined;
 		if (agentTool(now?.status?.app) !== from || (nowState !== "idle" && nowState !== "done") || nowPid !== pid) {
 			fs.rmSync(handoffPath, { force: true });
 			return skip(nowPid === pid ? `became ${nowState}` : "the process changed");
@@ -266,10 +266,10 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 		// too, so a killed tool does not go out of sight.
 		const stopped = new Map<string, Tool>();
 		const found = await targets(exec, only, async (info, terminal) => {
-			const fg = info.foreground?.pid;
-			const pid = fg ? await toolPid(exec, fg, from) : undefined;
+			const fg = info.foreground?.pid ?? info.pid;
+			const pid = fg ? await toolPid(exec, fg, from, info.pid) : undefined;
 			if (pid) return from === "claude" || agentTool(info.status?.app) === "omp";
-			if (fg && (await toolPid(exec, fg, from === "omp" ? "claude" : "omp"))) return false;
+			if (fg && (await toolPid(exec, fg, from === "omp" ? "claude" : "omp", info.pid))) return false;
 			const tool = stoppedTool(terminal, info.created_ms);
 			if (tool) stopped.set(terminal, tool);
 			return !!tool;

@@ -22,6 +22,8 @@ export type Exec = (cmd: string, args: string[]) => Promise<{ code: number; stdo
 
 export interface HcGet {
 	argv?: string[];
+	// The terminal's own program (the shell, or the tool when it is the terminal's program).
+	pid?: number;
 	created_ms?: number;
 	cwd?: string;
 	title?: string;
@@ -74,12 +76,22 @@ export function runner(exec: Exec) {
 
 export const hcGet = async (exec: Exec, t: string) => JSON.parse(await runner(exec)("hc", ["get", t, "--json"])) as HcGet;
 
-// The process of a tool (omp, claude): the foreground itself, or its child under `zsh -lc`.
-export async function toolPid(exec: Exec, fg: number, name: string): Promise<number | undefined> {
+// The process of a tool (omp, claude): the foreground itself, or its child under `zsh -lc`. While the
+// tool runs a hook or a command in its own process group, that process is the foreground, and the
+// tool is one of its ancestors: with root (the terminal's own process), look up to it too. hc get can
+// leave out foreground for a moment, so callers pass the terminal's own pid as fg then.
+export async function toolPid(exec: Exec, fg: number, name: string, root?: number): Promise<number | undefined> {
 	const comm = (await exec("ps", ["-o", "comm=", "-p", String(fg)])).stdout.trim();
 	if (path.basename(comm) === name) return fg;
 	const child = (await exec("pgrep", ["-P", String(fg), "-x", name])).stdout.trim().split("\n")[0];
-	return child ? Number(child) : undefined;
+	if (child) return Number(child);
+	let pid = fg;
+	for (let n = 0; root && pid !== root && n < 8; n++) {
+		pid = Number((await exec("ps", ["-o", "ppid=", "-p", String(pid)])).stdout.trim());
+		if (!pid || pid <= 1) break;
+		if (path.basename((await exec("ps", ["-o", "comm=", "-p", String(pid)])).stdout.trim()) === name) return pid;
+	}
+	return undefined;
 }
 
 // The terminal keeps a shell after omp ends only when omp runs under an interactive shell:
@@ -207,8 +219,8 @@ export async function backIn(
 		if (sent?.error) return { target: t, ok: false, note: `failed: hc send did not work: ${sent.error}` };
 		const info = await hcGet(exec, terminal).catch(() => undefined);
 		const state = info ? stateOf(info) : "unknown";
-		const fg = info?.foreground?.pid;
-		const pid = fg ? await toolPid(exec, fg, want.name) : undefined;
+		const fg = info?.foreground?.pid ?? info?.pid;
+		const pid = fg ? await toolPid(exec, fg, want.name, info?.pid) : undefined;
 		if (pid && pid !== oldPid && agentTool(info?.status?.app) === want.app && want.states.includes(state)) return { target: t, ok: true, note: `${want.ok}${suffix}` };
 		await Bun.sleep(500);
 	}
@@ -226,8 +238,8 @@ export default function herdrReload(pi: ExtensionAPI) {
 		const info = await hcGet(exec, t.terminal);
 		const state = stateOf(info);
 		if (state !== "idle" && state !== "done") return { target: t, ok: false, note: `skipped: ${state}` };
-		const fg = info.foreground?.pid;
-		const pid = fg ? await toolPid(exec, fg, "omp") : undefined;
+		const fg = info.foreground?.pid ?? info.pid;
+		const pid = fg ? await toolPid(exec, fg, "omp", info.pid) : undefined;
 		if (!pid) return { target: t, ok: false, note: "skipped: no omp process found" };
 		const file = await ompSessionFile(exec, t, pid);
 		if (!file) return { target: t, ok: false, note: "skipped: no session file found" };
@@ -271,8 +283,8 @@ export default function herdrReload(pi: ExtensionAPI) {
 			const only = args.trim() || undefined;
 			// hc keeps the last omp status after omp ends, so a plain shell can still read as omp.
 			const all = await targets(exec, only, async info => {
-				const fg = info.foreground?.pid;
-				return agentTool(info.status?.app) === "omp" && !!fg && !!(await toolPid(exec, fg, "omp"));
+				const fg = info.foreground?.pid ?? info.pid;
+				return agentTool(info.status?.app) === "omp" && !!fg && !!(await toolPid(exec, fg, "omp", info.pid));
 			});
 			if (all.length === 0) {
 				ctx.ui.notify(only ? `/reload: no omp session in a space named ${only}` : "/reload: no omp sessions found", "warning");
