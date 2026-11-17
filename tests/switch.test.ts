@@ -18,6 +18,7 @@ const LONG = 240_000;
 
 interface HcGet {
 	argv?: string[];
+	pid?: number;
 	created_ms?: number;
 	cwd?: string;
 	title?: string;
@@ -59,7 +60,7 @@ const ELSEWHERE = "/elsewhere/not-this-folder";
 const firstConfig = JSON.stringify({ numStartups: 7, projects: { [ELSEWHERE]: { allowedTools: ["Bash"], hasTrustDialogAccepted: false } } }, null, 2);
 const config = () => JSON.parse(fs.readFileSync(claudeJson, "utf8"));
 let reload: {
-	toolPid(exec: unknown, fg: number, name: string): Promise<number | undefined>;
+	toolPid(exec: unknown, fg: number, name: string, root?: number): Promise<number | undefined>;
 	shellStays(argv: string[]): boolean;
 	OMP_CRUMBS: string;
 };
@@ -403,7 +404,7 @@ test(
 	"/claude skips a terminal when the Claude config does not parse, and leaves omp and the file as they were",
 	async () => {
 		const t = await ompSpace("tmp-switch-broken", sb.work("switch-broken"));
-		const pid = (await get(t)).foreground?.pid;
+		const pid = last("omp", t)!.pid;
 		const good = fs.readFileSync(claudeJson, "utf8");
 		fs.writeFileSync(claudeJson, "{ not json");
 		try {
@@ -413,10 +414,55 @@ test(
 			expect(fs.readFileSync(claudeJson, "utf8")).toBe("{ not json");
 			const info = await get(t);
 			expect(info.status?.app).toBe("omp");
-			expect(info.foreground?.pid).toBe(pid);
+			// The same omp still runs (the raw foreground pid can be a short child of the shell or omp).
+			expect(await reload.toolPid(exec, info.foreground!.pid!, "omp", info.pid)).toBe(pid);
 		} finally {
 			fs.writeFileSync(claudeJson, good);
 		}
+	},
+	LONG,
+);
+
+test(
+	"/omp switches a Claude terminal that reports claude-code, as Claude Code itself does",
+	async () => {
+		// The wrapper of space.new: the shell stays after Claude. The folder is trusted since the first /claude.
+		const t = (await newSpace("tmp-switch-code", ["/usr/bin/env", "FAKE_AGENT_APP=claude-code", path.join(sb.bin, "claude")])).terminal;
+		await until(t, isApp("claude-code", "idle"), "fake claude idle as claude-code");
+
+		await cmd("omp").handler("tmp-switch-code", ctx);
+		const text = report();
+		expect(text).toBe(`/omp: 1 switched, 0 skipped or failed.\nSwitched:\n- ${t} (tmp-switch-code): switched to omp (new session, full handoff)`);
+		const info = await until(t, isApp("omp", "idle"), "fake omp idle");
+		const l = last("omp", t)!;
+		expect(l.argv[0]).toContain("This terminal moved from Claude Code to omp. The handoff below");
+		expect(await reload.toolPid(exec, info.foreground!.pid!, "omp")).toBe(l.pid);
+		expect(crumbLines(mod.CLAUDE_CRUMBS, t)[2]).toBe("quit");
+	},
+	LONG,
+);
+
+test(
+	"/claude and /omp list a terminal whose omp was killed, and leave its shell alone",
+	async () => {
+		const t = await ompSpace("tmp-switch-killed", sb.work("switch-killed"));
+		const omp = last("omp", t)!;
+		// SIGKILL: omp writes no quit mark, and the shell it ran in stays.
+		process.kill(omp.pid, "SIGKILL");
+		const shell = (await until(t, i => !!i.foreground?.pid && i.foreground.pid !== omp.pid, "shell back")).foreground!.pid!;
+		expect(await reload.toolPid(exec, shell, "omp")).toBeUndefined();
+		expect(crumbLines(reload.OMP_CRUMBS, t)[2]).not.toBe("quit");
+
+		const note = `- ${t} (tmp-switch-killed): skipped: no agent runs; its omp session stopped (type omp or claude there to resume it)`;
+		for (const name of ["claude", "omp"]) {
+			await cmd(name).handler("tmp-switch-killed", ctx);
+			expect(report()).toBe(`/${name}: 0 switched, 1 skipped or failed.\nSkipped or failed (type /${name} again later, or switch these by hand):\n${note}`);
+		}
+		const info = await get(t);
+		expect(info.foreground?.pid).toBe(shell);
+		expect(last("omp", t)?.pid).toBe(omp.pid);
+		expect(last("claude", t)).toBeUndefined();
+		expect(crumbLines(reload.OMP_CRUMBS, t)[2]).not.toBe("quit");
 	},
 	LONG,
 );

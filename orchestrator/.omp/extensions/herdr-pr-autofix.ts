@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { herdrClient, isAgentApp } from "../tools/herdr.ts";
+import { agentTool, herdrClient } from "../tools/herdr.ts";
 import { type OpenPr, POLL_EVENT, type Poll } from "./herdr-pr-ready.ts";
 import { FORGET_EVENT } from "./herdr-watch.ts";
 
@@ -172,7 +172,7 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 						tab.terminals.map(async term => {
 							const info = await herdr.get(hcId(term.terminal)).catch(() => undefined);
 							const cwd = info?.foreground?.cwd ?? info?.cwd;
-							if (isAgentApp(info?.status?.app) && cwd && cwd !== own) workers.push({ space: space.name, cwd });
+							if (agentTool(info?.status?.app) && cwd && cwd !== own) workers.push({ space: space.name, cwd });
 						}),
 					),
 				),

@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { theme, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { isAgentApp, shareWatch, type StartWatch } from "../tools/herdr.ts";
+import { agentTool, shareWatch, type StartWatch } from "../tools/herdr.ts";
 
 const START_MS = 60_000;
 // Since omp 18.18.9 a worker stays working while its background job runs, so a stop is final and
@@ -188,7 +188,7 @@ function claudeAnswer(lines: string[]): string | undefined {
 
 // The last assistant text after the newest user prompt, from the worker's session file.
 export function finalAnswer(terminal: string, createdMs: number | undefined, app?: string): string | undefined {
-	const claude = app === "claude";
+	const claude = agentTool(app) === "claude";
 	const lines = sessionTail(claude ? CLAUDE_CRUMBS : CRUMBS, terminal, createdMs);
 	if (!lines) return undefined;
 	return claude ? claudeAnswer(lines) : ompAnswer(lines);
@@ -417,7 +417,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			if (ctx.agent.kind === "main" && ctx.hasUI) ui = ctx.ui;
 			const info = await get(params.terminal, signal ?? new AbortController().signal);
-			if (!isAgentApp(info.status?.app)) throw new Error(`Terminal ${params.terminal} runs ${info.status?.app ?? "no agent"}, not omp or claude`);
+			if (!agentTool(info.status?.app)) throw new Error(`Terminal ${params.terminal} runs ${info.status?.app ?? "no agent"}, not omp or claude`);
 			const details = begin(params.terminal, params.after_turn, params.prompt, info);
 			return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 		},

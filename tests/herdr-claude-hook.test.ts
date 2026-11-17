@@ -30,13 +30,14 @@ afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-async function run(input: object, opts: { terminal?: string; tty?: boolean; argv?: string[] } = {}) {
+async function run(input: object, opts: { terminal?: string; tty?: boolean; argv?: string[]; ancestors?: string } = {}) {
 	const env: Record<string, string> = {
 		HOME: home,
 		PATH: `${bin}:${process.env.PATH}`,
 		HC_TERMINAL_ID: opts.terminal ?? "tTEST",
 	};
 	if (opts.tty !== false) env.HERDR_CLAUDE_HOOK_TTY = tty;
+	if (opts.ancestors !== undefined) env.HERDR_CLAUDE_HOOK_ANCESTORS = opts.ancestors;
 	const proc = Bun.spawn(opts.argv ?? ["sh", SCRIPT], {
 		env,
 		stdin: new Blob([JSON.stringify(input)]),
@@ -48,7 +49,7 @@ async function run(input: object, opts: { terminal?: string; tty?: boolean; argv
 	expect(code).toBe(0);
 }
 
-const osc = (state: string) => `\x1b]7501;state=${state}:app=claude\x07`;
+const osc = (state: string) => `\x1b]7501;state=${state}:app=claude-code\x07`;
 const ttyText = () => (existsSync(tty) ? readFileSync(tty, "utf8") : "");
 const base = { session_id: "0d9a1c2e-1111-4222-8333-444455556666", transcript_path: TRANSCRIPT, cwd: "/tmp" };
 
@@ -123,4 +124,23 @@ test("parent that is not claude writes nothing", async () => {
 	await run({ ...base, hook_event_name: "SessionStart" }, { tty: false, argv });
 	expect(ttyText()).toBe("");
 	expect(existsSync(join(home, ".local"))).toBe(false);
+});
+
+test("report uses app=claude-code", async () => {
+	await run({ ...base, hook_event_name: "Stop" });
+	expect(ttyText()).toBe("\x1b]7501;state=done:app=claude-code\x07");
+});
+
+for (const outer of ["claude", "/usr/local/bin/omp"]) {
+	test(`claude nested in ${outer} writes nothing`, async () => {
+		await run({ ...base, hook_event_name: "SessionStart" }, { ancestors: `zsh login ${outer} zsh` });
+		expect(ttyText()).toBe("");
+		expect(existsSync(crumb)).toBe(false);
+	});
+}
+
+test("claude under a plain shell still reports", async () => {
+	await run({ ...base, hook_event_name: "SessionStart" }, { ancestors: "zsh login" });
+	expect(ttyText()).toBe(osc("idle"));
+	expect(readFileSync(crumb, "utf8")).toBe(`123\n${TRANSCRIPT}\n`);
 });
