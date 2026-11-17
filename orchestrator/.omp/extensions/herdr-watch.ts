@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { theme, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { shareWatch, type StartWatch } from "../tools/herdr.ts";
+import { isAgentApp, shareWatch, type StartWatch } from "../tools/herdr.ts";
 
 const START_MS = 60_000;
 // Since omp 18.18.9 a worker stays working while its background job runs, so a stop is final and
@@ -28,6 +28,8 @@ const ANSWER_MAX = 6_000;
 const WIDGET = "herdr-watch";
 // herdr-resume.ts writes this breadcrumb in each worker: created_ms, then the session file.
 const CRUMBS = path.join(os.homedir(), ".local/state/omp-herdr-resume");
+// The Claude Code hook (claude/hooks/herdr-claude.sh) writes the same breadcrumb for a Claude worker.
+const CLAUDE_CRUMBS = path.join(os.homedir(), ".local/state/claude-herdr-resume");
 // herdr-pr-autofix.ts sends this ({ terminal }) just before it closes a fix agent's tab, so that
 // the watch of that terminal ends without a report.
 export const FORGET_EVENT = "herdr-watch:forget";
@@ -94,21 +96,33 @@ function links(text: string): string[] {
 
 interface Message {
 	type?: string;
-	message?: { role?: string; content?: unknown };
+	isSidechain?: boolean;
+	isMeta?: boolean;
+	isCompactSummary?: boolean;
+	message?: { id?: string; role?: string; content?: unknown };
 }
 
-// The last assistant text after the newest user prompt, from the worker's session file.
-function finalAnswer(terminal: string, createdMs: number | undefined): string | undefined {
+type Block = { type?: string; text?: string };
+const texts = (content: unknown) =>
+	Array.isArray(content)
+		? (content as Block[])
+				.filter(c => c?.type === "text" && c.text)
+				.map(c => c.text)
+				.join("\n")
+				.trim()
+		: "";
+
+// The last 4 MB of the session file that the terminal's breadcrumb in dir names, as lines.
+function sessionTail(dir: string, terminal: string, createdMs: number | undefined): string[] | undefined {
 	let file: string | undefined;
 	try {
-		const [created, session] = fs.readFileSync(path.join(CRUMBS, terminal), "utf8").split("\n");
+		const [created, session] = fs.readFileSync(path.join(dir, terminal), "utf8").split("\n");
 		// A reused terminal address must not read another terminal's session.
 		if (created === String(createdMs)) file = session;
 	} catch {
 		return undefined;
 	}
 	if (!file) return undefined;
-	let tail: string;
 	try {
 		const fd = fs.openSync(file, "r");
 		try {
@@ -116,14 +130,17 @@ function finalAnswer(terminal: string, createdMs: number | undefined): string | 
 			const len = Math.min(size, 4 * 1024 * 1024);
 			const buf = Buffer.alloc(len);
 			fs.readSync(fd, buf, 0, len, size - len);
-			tail = buf.toString("utf8");
+			return buf.toString("utf8").split("\n");
 		} finally {
 			fs.closeSync(fd);
 		}
 	} catch {
 		return undefined;
 	}
-	const lines = tail.split("\n");
+}
+
+// Line 0 of the tail can be a cut line, so the loops stop before it.
+function ompAnswer(lines: string[]): string | undefined {
 	for (let i = lines.length - 1; i > 0; i--) {
 		let entry: Message;
 		try {
@@ -134,15 +151,47 @@ function finalAnswer(terminal: string, createdMs: number | undefined): string | 
 		if (entry.type !== "message") continue;
 		const role = entry.message?.role;
 		if (role === "user") return undefined;
-		if (role !== "assistant" || !Array.isArray(entry.message?.content)) continue;
-		const text = (entry.message.content as { type?: string; text?: string }[])
-			.filter(c => c.type === "text" && c.text)
-			.map(c => c.text)
-			.join("\n")
-			.trim();
+		if (role !== "assistant") continue;
+		const text = texts(entry.message?.content);
 		if (text) return text;
 	}
 	return undefined;
+}
+
+// Claude Code writes each block of a reply as its own entry (with the same message.id), and a tool
+// result as a user entry. A real prompt is a user entry with text that is not meta.
+function claudeAnswer(lines: string[]): string | undefined {
+	const parts: string[] = [];
+	let id: string | undefined;
+	for (let i = lines.length - 1; i > 0; i--) {
+		let entry: Message;
+		try {
+			entry = JSON.parse(lines[i]) as Message;
+		} catch {
+			continue;
+		}
+		if (entry.isSidechain || entry.isMeta || entry.isCompactSummary) continue;
+		const content = entry.message?.content;
+		if (entry.type === "user") {
+			if (typeof content === "string" ? content.trim() : texts(content)) break;
+			continue;
+		}
+		if (entry.type !== "assistant") continue;
+		if (parts.length > 0 && (id === undefined || entry.message?.id !== id)) break;
+		const text = texts(content);
+		if (!text) continue;
+		id = entry.message?.id;
+		parts.unshift(text);
+	}
+	return parts.join("\n") || undefined;
+}
+
+// The last assistant text after the newest user prompt, from the worker's session file.
+export function finalAnswer(terminal: string, createdMs: number | undefined, app?: string): string | undefined {
+	const claude = app === "claude";
+	const lines = sessionTail(claude ? CLAUDE_CRUMBS : CRUMBS, terminal, createdMs);
+	if (!lines) return undefined;
+	return claude ? claudeAnswer(lines) : ompAnswer(lines);
 }
 
 export default function herdrWatch(pi: ExtensionAPI) {
@@ -218,7 +267,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 
 	async function report(w: Watch, info: HcGet, note: string | undefined, signal: AbortSignal) {
 		const state = stateOf(info);
-		let answer = state === "done" || state === "idle" ? finalAnswer(w.terminal, info.created_ms) : undefined;
+		let answer = state === "done" || state === "idle" ? finalAnswer(w.terminal, info.created_ms, info.status?.app) : undefined;
 		let source = "session";
 		if (!answer) {
 			// A dialog or an error shows only on the screen; so does the answer of a worker without a breadcrumb.
@@ -327,8 +376,8 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		return { terminal: w.terminal, space: w.space, space_id: w.spaceId, label: label(w, watches.values()), watching: true };
 	}
 
-	// For the send tools. They checked that the terminal runs omp, or just started omp there
-	// (herdr_new_space does not wait for it, so omp can be missing for a moment).
+	// For the send tools. They checked that the terminal runs omp or claude, or just started one there
+	// (herdr_new_space does not wait for it, so the agent can be missing for a moment).
 	const startShared: StartWatch = async (terminal, afterTurn, prompt, signal) =>
 		begin(terminal, afterTurn, prompt, await get(terminal, signal ?? new AbortController().signal));
 	let unshare: (() => void) | undefined;
@@ -358,7 +407,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		name: "herdr_watch",
 		label: "Herdr Watch",
 		description:
-			"Watch one omp worker terminal after herdr_send, herdr_new_agent, or herdr_new_space, without a subagent. Those tools start this watch themselves when they get `watch`; call herdr_watch only for a terminal they did not watch, such as a fix agent. Returns at once. When the worker stops (done, idle, blocked on a question, or error), a <herdr-report> message with its final answer arrives in this session and starts a turn. It keeps watching: a blocked worker until it stops again, a done worker for 10 minutes in case it wakes for its own background job; each later stop sends another report marked update. A new herdr_watch on the same terminal replaces the old watch. after_turn is the turn from herdr_send, or 0 for a new terminal. prompt is a summary of the request in about 10 words; the Workers panel shows '<space>: <prompt>', or '<space>, <task title>: <prompt>' when that space has two watched workers.",
+			"Watch one agent worker terminal (omp or Claude Code) after herdr_send, herdr_new_agent, or herdr_new_space, without a subagent. Those tools start this watch themselves when they get `watch`; call herdr_watch only for a terminal they did not watch, such as a fix agent. Returns at once. When the worker stops (done, idle, blocked on a question, or error), a <herdr-report> message with its final answer arrives in this session and starts a turn. It keeps watching: a blocked worker until it stops again, a done worker for 10 minutes in case it wakes for its own background job; each later stop sends another report marked update. A new herdr_watch on the same terminal replaces the old watch. after_turn is the turn from herdr_send, or 0 for a new terminal. prompt is a summary of the request in about 10 words; the Workers panel shows '<space>: <prompt>', or '<space>, <task title>: <prompt>' when that space has two watched workers.",
 		loadMode: "essential",
 		parameters: pi.zod.object({
 			terminal: pi.zod.string(),
@@ -368,7 +417,7 @@ export default function herdrWatch(pi: ExtensionAPI) {
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			if (ctx.agent.kind === "main" && ctx.hasUI) ui = ctx.ui;
 			const info = await get(params.terminal, signal ?? new AbortController().signal);
-			if (info.status?.app !== "omp") throw new Error(`Terminal ${params.terminal} runs ${info.status?.app ?? "no agent"}, not omp`);
+			if (!isAgentApp(info.status?.app)) throw new Error(`Terminal ${params.terminal} runs ${info.status?.app ?? "no agent"}, not omp or claude`);
 			const details = begin(params.terminal, params.after_turn, params.prompt, info);
 			return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 		},

@@ -63,6 +63,10 @@ Limits:
 - The handoff is a summary, not a full conversion of the session.
 - Claude asks once per folder if it can trust it, and runs no hook before the answer. The switch does not answer for you: the report says which terminals ask, and those show no state until you answer.
 
+## Claude Code workers
+
+The orchestrator routes work to omp and Claude Code terminals (Herdr app `omp` or `claude`) the same way: `herdr_send`, `herdr_watch` and the PR fix agents' folder search take both. `herdr_new_agent` and `herdr_new_space` start the current mode, from `~/.local/state/herdr-switch/mode` (`omp` or `claude`, written by `/omp` and `/claude`; no file means omp): omp as before, or `claude` itself (not a shell alias). The final answer of a Claude worker comes from its transcript, found by the breadcrumb of the Claude hook in `~/.local/state/claude-herdr-resume/`. PR fix agents always start as omp. `~/.bun/bin/bun test tests/route.test.ts` checks this with fake `hc` and `herdr-app` programs and a temporary home.
+
 ## AI usage panel
 
 The Windows layout has a fixed compact `AI usage` block between the sidebar lists and footer. Each provider card always shows `Today local` token activity when local records exist. That activity covers the Windows calendar day from local midnight and resets at the next local midnight. It is activity, not quota: tokens are never converted into a quota percentage.
