@@ -208,10 +208,18 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 	// 100 ms: one check (hc get) takes about 15 ms, and a 500 ms step added about 0.35 s to each start.
 	async function waitStarted(terminal: string, signal?: AbortSignal, app: AgentApp = "omp") {
 		const deadline = Date.now() + 45_000;
+		let screenAt = 0;
 		for (;;) {
 			const info = await get(terminal, signal).catch(() => ({}) as HcGet);
 			const state = info.status?.state;
 			if (info.status?.app === app && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
+			// Claude asks once per folder if it can trust it, and reports no state before the answer.
+			if (app === "claude" && info.status?.app !== "claude" && Date.now() - screenAt >= 1000) {
+				screenAt = Date.now();
+				const screen = await run("hc", ["read", terminal, "--lines", "40"], signal).catch(() => "");
+				if (/trust this folder/i.test(screen))
+					throw new Error(`Claude on ${terminal} asks if it can trust this folder. Tell the user to answer it in that terminal; the task starts after the answer. Do not start it again.`);
+			}
 			if (Date.now() >= deadline)
 				throw new Error(`${app} on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
 			await sleep(100, signal);

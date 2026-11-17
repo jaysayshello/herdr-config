@@ -68,13 +68,14 @@ if (args[0] === "get") {
 	put(t, { ...info, turn: turn + 1, status: { ...info.status, state: "working" } });
 	console.log(JSON.stringify({ started: true, status: "idle", turn }));
 } else if (args[0] === "read") {
-	console.log("screen text");
+	console.log(fs.existsSync(path.join(dir, "untrusted")) ? "Quick safety check: Is this a project you trust?\\n Yes, I trust this folder" : "screen text");
 } else console.log("{}");
 `;
 	// A new terminal runs the app its argv starts, and has taken its first prompt.
 	const app = `${head}
 const argv = args.includes("--argv") ? JSON.parse(args[args.indexOf("--argv") + 1]) : [];
-const started = a => put("t9", { created_ms: 999, turn: 1, status: { app: a, state: "working" }, labels: { "herdr.space": "s9" } });
+// A Claude in a folder it does not trust yet shows a question and reports no state.
+const started = a => put("t9", fs.existsSync(path.join(dir, "untrusted")) ? { created_ms: 999, turn: 0, status: null, labels: { "herdr.space": "s9" } } : { created_ms: 999, turn: 1, status: { app: a, state: "working" }, labels: { "herdr.space": "s9" } });
 if (args[0] === "ls") process.stdout.write(fs.readFileSync(path.join(dir, "ls.json"), "utf8"));
 else if (args[0] === "do" && args[1] === "pane.split") {
 	started(/exec claude "\\$t"$/.test(argv[2]) ? "claude" : /exec omp "\\$t"$/.test(argv[2]) ? "omp" : "sh");
@@ -248,6 +249,19 @@ else if (args[0] === "do" && args[1] === "pane.split") {
 			const args = doCall("space.new")!.args;
 			expect(flag(args, "--argv")).toBe('["claude"]');
 			expect(flag(args, "--name")).toBe("tmp-docs");
+		});
+
+		test("herdr_new_agent in claude mode says when Claude asks to trust the folder", async () => {
+			setMode("claude\n");
+			fs.writeFileSync(path.join(fake, "untrusted"), "");
+			try {
+				const t0 = Date.now();
+				await expect(call("herdr_new_agent", { beside: "t1", task: "Write the docs" })).rejects.toThrow(/asks if it can trust this folder/);
+				// It says so at once, not after the 45 s start wait.
+				expect(Date.now() - t0).toBeLessThan(10_000);
+			} finally {
+				fs.rmSync(path.join(fake, "untrusted"));
+			}
 		});
 	});
 
