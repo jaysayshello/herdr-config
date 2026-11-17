@@ -41,6 +41,27 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `windows/wsl/systemd/` | `omp-update.service` and `.timer`: `omp update` a minute after start and each hour, as the LaunchAgent does. Restores to `~/.config/systemd/user/` |
 | `bench/` | Performance suite: `./bench/run.sh` times Herdr's start, omp's start in a new pane, the orchestrator tools, the Pull requests panel, the PR polls and their GitHub cost, and CPU and memory, in a sandbox with a test window and core, and writes a JSON file; `bun bench/compare.ts a.json b.json` compares two runs. See `bench/README.md` |
 | `rex/` | The Rex app set up like Herdr: the same keys (`rex/config/init.lua`, listed in `rex/KEYS.md`), a Pull requests tab, `rex-focus://` links, omp session resume, and a Rex orchestrator with `rex_*` tools, `rex_watch`, PR notices, PR fix agents and `/reload`. Mac only. See `rex/README.md` |
+| `orchestrator/.omp/extensions/herdr-switch.ts`, `orchestrator/.omp/lib/handoff.ts` | `/claude` and `/omp` (see below) and the handoff file builder they use. omp does not load `lib/` as an extension |
+| `claude/hooks/herdr-claude.sh` | Claude Code hook: reports Claude's state to Herdr and keeps a resume breadcrumb for each terminal. Restores to `~/.claude/hooks/`; `settings.json` is never synced |
+| `tests/` | `tests/run.sh` runs `bun test tests/` in a sandbox (own HOME, test core `herdrtest`, test window), with fake `omp` and `claude` programs (`tests/fakes/fake-agent.ts`) |
+
+## /claude and /omp
+
+Type `/claude` in the orchestrator to switch each idle or done omp terminal to Claude Code, in the same pane and cwd. `/omp` switches each Claude Code terminal back. `/claude <space name>` and `/omp <space name>` switch one space. The command ends with one report: switched, skipped (with the reason), failed. New workers start in the current mode.
+
+- The context moves with a handoff file in `~/.local/state/herdr-switch/handoffs/` (mode 600, deleted after 24 h): the summary, the user prompts, the last answers, the open task and the project state. No tool output goes across. The shell reads the file into the first prompt of the new tool, so the handoff stays in the new session and Claude asks no question about the handoff folder.
+- A switch back resumes the tool's own old session, with a handoff of only the part after the last switch away. If that session moved on in the meantime, Claude gets a fork of it (`--fork-session`) and omp gets a new session with a full handoff.
+- The title keeps its text; the `π` at the start becomes `✳` for Claude.
+- Skipped: the orchestrator and its space, the `reviewers` space, terminals that are working, blocked, in error or have no state, Claude with a background job, and terminals with no session file.
+
+The Claude hook is required: Herdr gets Claude's state only from it, so both commands refuse to run without it. Copy `claude/hooks/herdr-claude.sh` to `~/.claude/hooks/`, then add it to `~/.claude/settings.json` for the events listed at the top of the script (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PermissionRequest`, `Stop`, `StopFailure`, `SessionEnd`), next to any hooks already there. Restart each Claude session to load it.
+
+Limits:
+
+- A terminal that runs omp as its program, with no shell after it, gets a new pane in the same place, so its terminal id changes. The report shows `old -> new`.
+- A Claude terminal needs the hook. One started before the hook has no state, and `/omp` skips it.
+- The handoff is a summary, not a full conversion of the session.
+- Claude asks once per folder if it can trust it, and runs no hook before the answer. The switch does not answer for you: the report says which terminals ask, and those show no state until you answer.
 
 ## AI usage panel
 

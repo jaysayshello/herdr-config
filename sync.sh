@@ -26,6 +26,8 @@ RESTORE=$([ "${1:-}" = "--restore" ] && echo 1 || true)
 copy() { # copy <from-dir> <to-dir> <paths...>
   from=$1 to=$2; shift 2
   for p in "$@"; do
+    # Saving skips a path that is not on this machine.
+    [ -n "$RESTORE" ] || [ -e "$from/$p" ] || continue
     mkdir -p "$to/$(dirname "$p")"
     # shellcheck disable=SC2086
     rsync -a --delete $PERMS $EXCLUDE "$from/$p" "$to/$(dirname "$p")/"
@@ -60,9 +62,11 @@ else
   sync "$HOME/.omp/agent" rex/omp extensions/rex-resume.ts
   sync "$REX_ORCHESTRATOR" rex/orchestrator/.omp APPEND_SYSTEM.md agents tools extensions/rex-watch.ts extensions/rex-pr-ready.ts extensions/rex-pr-autofix.ts extensions/rex-reload.ts
 fi
-# omp: per-terminal session resume, and the orchestrator space's prompt, agents, herdr_* tools, herdr_watch, the spaces list before each request, PR ready notices, PR fix agents and /reload.
+# omp: per-terminal session resume, and the orchestrator space's prompt, agents, herdr_* tools, herdr_watch, the spaces list before each request, PR ready notices, PR fix agents, /reload, and /claude and /omp with their handoff builder (lib/).
 sync "$HOME/.omp/agent" omp extensions/herdr-resume.ts
-sync "$ORCHESTRATOR" orchestrator/.omp APPEND_SYSTEM.md agents tools extensions/herdr-watch.ts extensions/herdr-spaces.ts extensions/herdr-pr-ready.ts extensions/herdr-pr-autofix.ts extensions/herdr-reload.ts
+sync "$ORCHESTRATOR" orchestrator/.omp APPEND_SYSTEM.md agents tools lib extensions/herdr-watch.ts extensions/herdr-spaces.ts extensions/herdr-pr-ready.ts extensions/herdr-pr-autofix.ts extensions/herdr-reload.ts extensions/herdr-switch.ts
+# Claude Code: only the Herdr state hook. settings.json stays out: it can hold work data.
+sync "$HOME/.claude" claude hooks/herdr-claude.sh
 
 if [ -n "$RESTORE" ]; then
   if [ -n "$WSL" ]; then
