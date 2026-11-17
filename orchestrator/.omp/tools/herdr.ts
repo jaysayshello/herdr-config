@@ -86,6 +86,17 @@ export function workerArgv(app: AgentApp) {
 	return { argv: [app], script: `t=$(cat "$1") && rm -f "$1" && exec ${app} "$t"` };
 }
 
+// A new agent's task goes through a file: a Mac security rule can kill `sh -lc` at once when a
+// long argument follows it, and Herdr's core then puts a plain login shell in the new pane.
+function taskFile(task: string): string {
+	const file = path.join(os.tmpdir(), `herdr-task-${crypto.randomUUID()}`);
+	fs.writeFileSync(file, task, { mode: 0o600 });
+	return file;
+}
+
+// Ctrl+r's script (herdr-app/scripts): every pane of a tab gets an equal share.
+const BALANCE = path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config/herdr-app"), "scripts/balance-panes.sh");
+
 // herdr_send, herdr_new_agent and herdr_new_space take `watch` (the ~10-word summary) and start
 // the watch of extensions/herdr-watch.ts at once, which saves the model a herdr_watch call.
 // Custom tools get no pi.events, and omp loads each extension as a new module copy, so the
@@ -140,8 +151,9 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 // The Herdr calls the tools below make. extensions/herdr-pr-autofix.ts uses them too, to start its
-// fix agents in tabs (newTab, waitStarted) and to close those tabs (closeTab), and
-// extensions/herdr-spaces.ts puts the herdr_spaces list (spaces) before each user request.
+// fix agents side by side in one space (newPane, waitStarted) and to close their panes
+// (closePane), and extensions/herdr-spaces.ts puts the herdr_spaces list (spaces) before each
+// user request.
 export function herdrClient(exec: CustomToolAPI["exec"]) {
 	async function run(cmd: string, args: string[], signal?: AbortSignal): Promise<string> {
 		const r = await exec(cmd, args, { signal });
@@ -250,10 +262,7 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		// space.new starts its argv in a login shell, but pane.split runs it as is, with the PATH
 		// herdr-core started with, which lacks ~/.local/bin (where omp and claude are) on a remote
 		// machine.
-		// The task goes through a file: a Mac security rule can kill `sh -lc` at once when a long
-		// argument follows it, and Herdr's core then puts a plain login shell in the new pane.
-		const file = path.join(os.tmpdir(), `herdr-task-${crypto.randomUUID()}`);
-		fs.writeFileSync(file, task, { mode: 0o600 });
+		const file = taskFile(task);
 		const app = readMode();
 		const argv = ["sh", "-lc", workerArgv(app).script, "sh", file];
 		let split: { pane: string; terminal: string };
@@ -272,40 +281,78 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		return { space, pane: split.pane, terminal, turn: 0 };
 	}
 
-	// Starts omp in folder with task as its first prompt, in a new tab named tabName of the space
-	// named spaceName, which it makes if it is missing. Herdr shows a new space or tab at once, so
-	// this shows again the space, tab and pane that were shown before. It does not wait for omp.
-	async function newTab(spaceName: string, tabName: string, folder: string, task: string, signal?: AbortSignal) {
+	// Gives every pane of a tab (a herdr-app ls id) an equal share, as Ctrl+r does. Only the layout
+	// depends on it, so a failure is ignored.
+	async function balance(tab: string, signal?: AbortSignal) {
+		const slash = tab.lastIndexOf("/");
+		const args = slash < 0 ? [tab] : [tab.slice(slash + 1), tab.slice(0, slash)];
+		await run(BALANCE, args, signal).catch(() => {});
+	}
+
+	// Starts omp in folder with task as its first prompt, in a new pane of the space named
+	// spaceName, to the right of the panes of its first tab, which then get equal widths. A missing
+	// space is made, with one tab named tabName. Herdr shows a new space or pane at once, so this
+	// shows again the space, tab and pane that were shown before. It does not wait for omp.
+	async function newPane(spaceName: string, tabName: string, folder: string, task: string, signal?: AbortSignal) {
 		const [{ spaces, machine, hcId }, shown] = await Promise.all([view(signal), runJson<Shown>("herdr-app", ["status"], signal)]);
 		const space = spaces.find(s => s.name === spaceName);
-		const agent = ["--folder", folder, "--argv", '["omp"]', "--task", task];
-		const created = await runJson<Created>(
-			"herdr-app",
-			space
-				? ["do", "tab.new", "--space", space.id, "--name", tabName, ...agent]
-				: ["do", "space.new", "--name", spaceName, "--tab", tabName, ...agent, ...(machine ? ["--machine", machine] : [])],
-			signal,
-		);
+		const tab = space?.tabs[0];
+		const last = tab?.terminals.at(-1)?.pane;
+		const file = taskFile(task);
+		const script = workerArgv("omp").script;
+		let made: Created;
+		try {
+			if (space && tab && last) {
+				// pane.split takes no folder, so the shell goes there first ($2).
+				const argv = ["sh", "-lc", `cd "$2" && ${script}`, "sh", file, folder];
+				const split = await runJson<{ terminal: string }>(
+					"herdr-app",
+					["do", "pane.split", "--direction", "right", "--pane", last, "--argv", JSON.stringify(argv)],
+					signal,
+				);
+				made = { space: space.id, tab: tab.id, terminal: split.terminal };
+			} else {
+				const agent = ["--folder", folder, "--argv", JSON.stringify(["sh", "-lc", script, "sh", file])];
+				made = await runJson<Created>(
+					"herdr-app",
+					space
+						? ["do", "tab.new", "--space", space.id, "--name", tabName, ...agent]
+						: ["do", "space.new", "--name", spaceName, "--tab", tabName, ...agent, ...(machine ? ["--machine", machine] : [])],
+					signal,
+				);
+			}
+		} catch (err) {
+			fs.rmSync(file, { force: true });
+			throw err;
+		}
+		if (tab && last) await balance(tab.id, signal);
 		// A failed step back (the user closed that space meanwhile) must not fail the start.
 		if (shown.space) await run("herdr-app", ["do", "space.select", "--id", shown.space], signal).catch(() => {});
 		if (shown.tab) await run("herdr-app", ["do", "tab.select", "--id", shown.tab], signal).catch(() => {});
 		if (shown.focused_pane) await run("herdr-app", ["do", "pane.focus", "--pane", shown.focused_pane], signal).catch(() => {});
-		return { space: created.space, tab: created.tab, terminal: hcId(created.terminal) };
+		return { space: made.space, tab: made.tab, terminal: hcId(made.terminal) };
 	}
 
-	// Closes tab `tab` of space `space` (herdr-app ls ids) and ends its terminals, but only if it
-	// still holds terminal `terminal`. Returns false if that tab is gone.
-	async function closeTab(space: string, tab: string, terminal: string, signal?: AbortSignal) {
+	// Closes the pane of terminal `terminal` in space `space` (a herdr-app ls id) and ends it; the
+	// other panes of its tab get equal widths again. Returns false if the terminal is gone. The last
+	// pane of a tab goes with its tab, because pane.close refuses to end a space.
+	async function closePane(space: string, terminal: string, signal?: AbortSignal) {
 		const { spaces, hcId } = await view(signal);
-		const found = spaces
-			.find(s => s.id === space)
-			?.tabs.find(t => t.id === tab && t.terminals.some(term => hcId(term.terminal) === terminal));
-		if (!found) return false;
-		await run("herdr-app", ["do", "tab.close", "--id", tab, "--confirmed", "true"], signal);
-		return true;
+		for (const tab of spaces.find(s => s.id === space)?.tabs ?? []) {
+			const term = tab.terminals.find(t => hcId(t.terminal) === terminal);
+			if (!term) continue;
+			if (tab.terminals.length === 1 || !term.pane) {
+				await run("herdr-app", ["do", "tab.close", "--id", tab.id, "--confirmed", "true"], signal);
+				return true;
+			}
+			await run("herdr-app", ["do", "pane.close", "--pane", term.pane], signal);
+			await balance(tab.id, signal);
+			return true;
+		}
+		return false;
 	}
 
-	return { run, runJson, ls, get, view, spaces, waitStarted, newAgent, newTab, closeTab };
+	return { run, runJson, ls, get, view, spaces, waitStarted, newAgent, newPane, closePane };
 }
 
 const factory: CustomToolFactory = (pi: CustomToolAPI) => {
