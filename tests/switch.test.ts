@@ -52,7 +52,12 @@ const ctx = { ui: { notify: (m: string, kind: string) => notes.push({ m, kind })
 // orchestrator; sibling: an idle omp in the orchestrator's own space.
 const T: Record<"a" | "b" | "c" | "busy" | "orch" | "sibling", string> = { a: "", b: "", c: "", busy: "", orch: "", sibling: "" };
 let c2 = "";
-let mod: { CLAUDE_CRUMBS: string; SWITCH_DIR: string; default(p: FakePi): void };
+let mod: { CLAUDE_CRUMBS: string; SWITCH_DIR: string; TRUST_BACKUP: string; default(p: FakePi): void };
+let claudeJson: string;
+// The Claude config before the first switch: other keys and another folder, which must not change.
+const ELSEWHERE = "/elsewhere/not-this-folder";
+const firstConfig = JSON.stringify({ numStartups: 7, projects: { [ELSEWHERE]: { allowedTools: ["Bash"], hasTrustDialogAccepted: false } } }, null, 2);
+const config = () => JSON.parse(fs.readFileSync(claudeJson, "utf8"));
 let reload: {
 	toolPid(exec: unknown, fg: number, name: string): Promise<number | undefined>;
 	shellStays(argv: string[]): boolean;
@@ -122,6 +127,9 @@ beforeAll(async () => {
 	fs.copyFileSync(path.join(repo, "claude/hooks/herdr-claude.sh"), path.join(claudeDir, "hooks/herdr-claude.sh"));
 	writeSettings(true);
 	process.env.CLAUDE_CONFIG_DIR = claudeDir;
+	// The Claude global config, where Claude keeps folder trust. No folder of the test is trusted yet.
+	claudeJson = path.join(claudeDir, ".claude.json");
+	fs.writeFileSync(claudeJson, firstConfig, { mode: 0o600 });
 
 	// The fakes, in place of the real omp link.
 	const built = path.join(sb.root, "fake-agent");
@@ -182,7 +190,9 @@ beforeAll(async () => {
 		if (d && typeof d === "object" && "terminal" in d && typeof d.terminal === "string") forgot.push(d.terminal);
 	});
 	mod.default(pi);
-	for (const p of [mod.CLAUDE_CRUMBS, mod.SWITCH_DIR, reload.OMP_CRUMBS]) assertNotReal(p);
+	const trust = await import(orchFile(repo, "lib/claude-trust.ts"));
+	expect(trust.claudeConfigFile()).toBe(claudeJson);
+	for (const p of [mod.CLAUDE_CRUMBS, mod.SWITCH_DIR, mod.TRUST_BACKUP, reload.OMP_CRUMBS, trust.claudeConfigFile()]) assertNotReal(p);
 }, LONG);
 
 afterAll(async () => {
@@ -282,6 +292,19 @@ test(
 		}
 		expect((await get(T.a)).title).toStartWith("✳");
 
+		// Claude asked no trust question: the switch marked the cwd, and only the cwd, as trusted. The rest
+		// of the config did not change, and the backup holds the config from before.
+		expect(text).not.toMatch(/trust/i);
+		const after = config();
+		expect(Object.keys(after.projects).sort()).toEqual([ELSEWHERE, folder].sort());
+		expect(after.projects[folder]).toEqual({ hasTrustDialogAccepted: true });
+		expect(after.projects[ELSEWHERE]).toEqual(JSON.parse(firstConfig).projects[ELSEWHERE]);
+		expect(after.numStartups).toBe(7);
+		expect(fs.statSync(claudeJson).mode & 0o777).toBe(0o600);
+		expect(fs.readFileSync(mod.TRUST_BACKUP, "utf8")).toBe(firstConfig);
+		expect(fs.statSync(mod.TRUST_BACKUP).mode & 0o777).toBe(0o600);
+		expect(fs.readdirSync(claudeDir).filter(f => f.startsWith(".claude.json."))).toEqual([]);
+
 		// Working and orchestrator-space terminals did not change.
 		for (const key of ["busy", "sibling", "orch"] as const) {
 			const info = await get(T[key]);
@@ -340,26 +363,60 @@ test(
 	LONG,
 );
 
-test(
-	"/claude in a folder that Claude does not trust yet reports the trust question",
-	async () => {
-		const untrusted = fs.realpathSync(sb.work("switch-untrusted"));
-		fs.writeFileSync(path.join(untrusted, ".fake-claude-untrusted"), "");
-		const c = await instance.app<{ space: string; terminal: string }>([
-			"do", "space.new", "--name", "tmp-switch-trust", "--folder", untrusted, "--tab", "main", "--focus", "false",
-		]);
-		spaceIds.push(c.space);
-		await until(c.terminal, i => !!i.foreground?.pid, "shell up");
-		await run("env", ["-u", "HC_TERMINAL_ID", "hc", "send", c.terminal, "omp"], { timeoutMs: 10_000 });
-		await until(c.terminal, isApp("omp", "idle"), "fake omp idle");
+// A space in a folder that Claude never saw, with omp typed at its shell prompt. folder is given as
+// is: the sandbox is under /tmp, which Claude keys by its real path, /private/tmp.
+async function ompSpace(name: string, dir: string) {
+	const c = await instance.app<{ space: string; terminal: string }>([
+		"do", "space.new", "--name", name, "--folder", dir, "--tab", "main", "--focus", "false",
+	]);
+	spaceIds.push(c.space);
+	await until(c.terminal, i => !!i.foreground?.pid, "shell up");
+	await run("env", ["-u", "HC_TERMINAL_ID", "hc", "send", c.terminal, "omp"], { timeoutMs: 10_000 });
+	await until(c.terminal, isApp("omp", "idle"), "fake omp idle");
+	return c.terminal;
+}
 
-		const t0 = Date.now();
-		await cmd("claude").handler("tmp-switch-trust", ctx);
+test(
+	"/claude in a folder that Claude never saw starts Claude with no trust question",
+	async () => {
+		const dir = sb.work("switch-new");
+		const real = fs.realpathSync(dir);
+		expect(real).not.toBe(dir);
+		const t = await ompSpace("tmp-switch-new", dir);
+		expect(config().projects[real]).toBeUndefined();
+
+		await cmd("claude").handler("tmp-switch-new", ctx);
 		const text = report();
-		expect(text).toStartWith("/claude: 1 switched, 0 skipped or failed.");
-		expect(text).toContain(`${c.terminal} (tmp-switch-trust): switched to Claude (new session, full handoff); answer the folder trust question`);
-		// It does not wait the full 60 s for a state that the dialog holds back.
-		expect(Date.now() - t0).toBeLessThan(30_000);
+		expect(text).toBe(`/claude: 1 switched, 0 skipped or failed.\nSwitched:\n- ${t} (tmp-switch-new): switched to Claude (new session, full handoff)`);
+		await until(t, isApp("claude", "idle"), "fake claude idle");
+		expect(last("claude", t)?.cwd).toBe(real);
+		expect(config().projects[real]).toEqual({ hasTrustDialogAccepted: true });
+		expect(config().projects[dir]).toBeUndefined();
+		expect(config().projects[path.dirname(real)]).toBeUndefined();
+		// The backup is made once, before the first change only.
+		expect(fs.readFileSync(mod.TRUST_BACKUP, "utf8")).toBe(firstConfig);
+	},
+	LONG,
+);
+
+test(
+	"/claude skips a terminal when the Claude config does not parse, and leaves omp and the file as they were",
+	async () => {
+		const t = await ompSpace("tmp-switch-broken", sb.work("switch-broken"));
+		const pid = (await get(t)).foreground?.pid;
+		const good = fs.readFileSync(claudeJson, "utf8");
+		fs.writeFileSync(claudeJson, "{ not json");
+		try {
+			await cmd("claude").handler("tmp-switch-broken", ctx);
+			expect(report()).toStartWith(`/claude: 0 switched, 1 skipped or failed.`);
+			expect(report()).toContain(`${t} (tmp-switch-broken): skipped: could not mark the folder as trusted for Claude`);
+			expect(fs.readFileSync(claudeJson, "utf8")).toBe("{ not json");
+			const info = await get(t);
+			expect(info.status?.app).toBe("omp");
+			expect(info.foreground?.pid).toBe(pid);
+		} finally {
+			fs.writeFileSync(claudeJson, good);
+		}
 	},
 	LONG,
 );

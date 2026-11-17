@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { trustFolder } from "../lib/claude-trust.ts";
 import { buildHandoff, firstPrompt, sessionPoint, type Tool, writeHandoff } from "../lib/handoff.ts";
 import {
 	backIn,
@@ -34,6 +35,8 @@ const STATE = path.join(os.homedir(), ".local/state");
 // The Claude hook (claude/hooks/herdr-claude.sh) writes this breadcrumb, in the shape of the omp one.
 export const CLAUDE_CRUMBS = path.join(STATE, "claude-herdr-resume");
 export const SWITCH_DIR = path.join(STATE, "herdr-switch");
+// A copy of the Claude config from before the first trust change of a switch.
+export const TRUST_BACKUP = path.join(SWITCH_DIR, "claude.json.backup");
 const CRUMBS: Record<Tool, string> = { omp: OMP_CRUMBS, claude: CLAUDE_CRUMBS };
 const NAMES: Record<Tool, string> = { omp: "omp", claude: "Claude" };
 const SHELL_CHILD = "(sh|bash|zsh|fish)";
@@ -191,9 +194,6 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 			states: ["idle", "working", "done"],
 			ok: `switched to ${NAMES[to]} (${how})`,
 			late: `${NAMES[to]} did not start`,
-			// Claude asks once per folder if it can trust it, and runs no hook (so reports no state) before
-			// the answer. The switch does not answer for the person.
-			dialog: to === "claude" ? { screen: /trust this folder/i, note: "answer the folder trust question of Claude in this terminal" } : undefined,
 		};
 
 		// The terminal can turn busy while the handoff is built; the stop below would end its work.
@@ -204,6 +204,16 @@ export default function herdrSwitch(pi: ExtensionAPI) {
 		if (now?.status?.app !== from || (nowState !== "idle" && nowState !== "done") || nowPid !== pid) {
 			fs.rmSync(handoffPath, { force: true });
 			return skip(nowPid === pid ? `became ${nowState}` : "the process changed");
+		}
+		// Claude asks once per folder if it can trust it, and runs no hook before the answer: mark this
+		// cwd (only this one) as trusted first. On a failure the old tool still runs.
+		if (to === "claude") {
+			try {
+				await trustFolder(cwd, TRUST_BACKUP);
+			} catch (err) {
+				fs.rmSync(handoffPath, { force: true });
+				return skip(`could not mark the folder as trusted for Claude: ${err instanceof Error ? err.message : String(err)}`);
+			}
 		}
 		writeRecord(t.terminal, record);
 		// A watch keeps a done worker for 10 minutes; the stop below must not reach it as a report.
