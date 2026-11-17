@@ -9,8 +9,10 @@ import * as path from "node:path";
 // before it points HOME at the sandbox.
 export const REAL_HOME = process.env.BENCH_REAL_HOME ?? "";
 export const BENCH_ROOT = process.env.BENCH_ROOT ?? "";
+// bench/run.sh's core session, and tests/run.sh's.
+export const TEST_SESSIONS = ["herdrbench", "herdrtest"];
 
-const REAL_STATE = ["herdr-pr-ready", "herdr-pr-autofix", "omp-herdr-resume"].map(d => path.join(REAL_HOME, ".local/state", d));
+const REAL_STATE = ["herdr-pr-ready", "herdr-pr-autofix", "omp-herdr-resume", "claude-herdr-resume", "herdr-switch"].map(d => path.join(REAL_HOME, ".local/state", d));
 
 function stop(why: string): never {
 	console.error(`bench: stopped before any test ran: ${why}`);
@@ -27,7 +29,8 @@ export function assertSandboxed() {
 		const mine = path.join(home, ".local/state", path.basename(dir));
 		if (mine === dir || mine.startsWith(`${REAL_HOME}/.local/state/`)) stop(`the state folder ${mine} is the real one`);
 	}
-	if (process.env.HC_SESSION !== "herdrbench") stop("HC_SESSION is not herdrbench, so hc would drive the real core");
+	// tests/run.sh uses its own core session, so the tests and a bench run never share a core.
+	if (!TEST_SESSIONS.includes(process.env.HC_SESSION ?? "")) stop(`HC_SESSION is not one of ${TEST_SESSIONS.join(", ")}, so hc would drive the real core`);
 	const app = process.env.HERDR_APP_HOME ?? "";
 	if (!app.startsWith(BENCH_ROOT)) stop(`HERDR_APP_HOME is ${app || "unset"}, so herdr-app would drive the real window`);
 }
