@@ -52,6 +52,7 @@ Type `/claude` in the orchestrator to switch each idle or done omp terminal to C
 - The context moves with a handoff file in `~/.local/state/herdr-switch/handoffs/` (mode 600, deleted after 24 h): the summary, the user prompts, the last answers, the open task and the project state. No tool output goes across. The shell reads the file into the first prompt of the new tool, so the handoff stays in the new session and Claude asks no question about the handoff folder.
 - A switch back resumes the tool's own old session, with a handoff of only the part after the last switch away. If that session moved on in the meantime, Claude gets a fork of it (`--fork-session`) and omp gets a new session with a full handoff.
 - The title keeps its text; the `π` at the start becomes `✳` for Claude.
+- Claude asks once per folder if it can trust it. Before `/claude` starts Claude in a terminal, it marks that terminal's cwd, and only that folder, as trusted in the Claude config (`projects["<real path>"].hasTrustDialogAccepted` in `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`), so Claude starts with no question. It takes Claude's own lock on the file, changes only that key and replaces the file with a temporary copy. Before its first change it keeps a copy in `~/.local/state/herdr-switch/claude.json.backup`. If the config does not parse, the terminal is skipped and the old tool keeps running.
 - Skipped: the orchestrator and its space, the `reviewers` space, terminals that are working, blocked, in error or have no state, Claude with a background job, and terminals with no session file.
 
 The Claude hook is required: Herdr gets Claude's state only from it, so both commands refuse to run without it. Copy `claude/hooks/herdr-claude.sh` to `~/.claude/hooks/`, then add it to `~/.claude/settings.json` for the events listed at the top of the script (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PermissionRequest`, `Stop`, `StopFailure`, `SessionEnd`), next to any hooks already there. Restart each Claude session to load it.
@@ -61,7 +62,6 @@ Limits:
 - A terminal that runs omp as its program, with no shell after it, gets a new pane in the same place, so its terminal id changes. The report shows `old -> new`.
 - A Claude terminal needs the hook. One started before the hook has no state, and `/omp` skips it.
 - The handoff is a summary, not a full conversion of the session.
-- Claude asks once per folder if it can trust it, and runs no hook before the answer. The switch does not answer for you: the report says which terminals ask, and those show no state until you answer.
 
 ## Claude Code workers
 

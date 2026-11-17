@@ -7,7 +7,8 @@
 //     real tool reads them, and adds the first prompt to it,
 //   - writes its breadcrumb (claude: through the hook in the Claude config folder,
 //     hooks/herdr-claude.sh, with a SessionStart input; directly when the hook wrote none),
-//   - reports `state=$FAKE_AGENT_STATE` (default idle) with OSC 7501, and ends on SIGTERM.
+//   - reports `state=$FAKE_AGENT_STATE` (default idle) with OSC 7501, and ends on SIGTERM,
+//   - claude only: in a folder that the Claude config does not trust, shows the trust question instead.
 import { spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -116,9 +117,23 @@ function claudeSession(): string {
 	return file;
 }
 
+// As the real Claude: a folder is trusted when it, or a folder above it, has
+// projects["<real path>"].hasTrustDialogAccepted in the global config ($CLAUDE_CONFIG_DIR/.claude.json).
+function trusted(): boolean {
+	const dir = process.env.CLAUDE_CONFIG_DIR;
+	let projects: Record<string, { hasTrustDialogAccepted?: boolean }> = {};
+	try {
+		projects = JSON.parse(fs.readFileSync(dir ? path.join(dir, ".claude.json") : path.join(os.homedir(), ".claude.json"), "utf8")).projects ?? {};
+	} catch {}
+	for (let d = fs.realpathSync(cwd); ; d = path.dirname(d)) {
+		if (projects[d]?.hasTrustDialogAccepted === true) return true;
+		if (d === path.dirname(d)) return false;
+	}
+}
+
 // The real Claude asks once per folder if it can trust it, and runs no hook until the answer.
-if (name === "claude" && fs.existsSync(path.join(cwd, ".fake-claude-untrusted"))) {
-	process.stdout.write("Quick safety check: Is this a project you trust?\n Do you trust this folder?\n");
+if (name === "claude" && !trusted()) {
+	process.stdout.write("Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n");
 	for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(sig, () => process.exit(0));
 	setInterval(() => {}, 1 << 30);
 } else {

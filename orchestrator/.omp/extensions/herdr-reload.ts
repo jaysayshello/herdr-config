@@ -189,9 +189,6 @@ export interface Expect {
 	// Outcome words: "restarted", and "omp did not come back".
 	ok: string;
 	late: string;
-	// A dialog the new tool shows before it reports any state, for the person to answer: on its screen,
-	// it counts as a start, with this note.
-	dialog?: { screen: RegExp; note: string };
 }
 
 // Passes when hc reports the expected tool in an expected state, with a new process of it in the foreground.
@@ -212,10 +209,6 @@ export async function backIn(
 		const fg = info?.foreground?.pid;
 		const pid = fg ? await toolPid(exec, fg, want.name) : undefined;
 		if (pid && pid !== oldPid && info?.status?.app === want.app && want.states.includes(state)) return { target: t, ok: true, note: `${want.ok}${suffix}` };
-		if (pid && pid !== oldPid && want.dialog && info?.status?.app !== want.app) {
-			const screen = await exec("hc", ["read", terminal]);
-			if (want.dialog.screen.test(screen.stdout.slice(-4000))) return { target: t, ok: true, note: `${want.ok}${suffix}; ${want.dialog.note}` };
-		}
 		await Bun.sleep(500);
 	}
 	return { target: t, ok: false, note: `failed: ${want.late} in 60 s${suffix}, look at ${terminal}` };
