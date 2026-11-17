@@ -177,21 +177,21 @@ A `<herdr-pr-merged>` message lists the user's pull requests that were just merg
 
 ### Fix agents for pull requests moved to ready
 
-A `<herdr-pr-autofix>` message comes from `herdr-pr-autofix.ts` when one of the user's pull requests moves from draft to ready. It has `result` (`started` or `error`), `repo`, `number`, `title`, `url`, and an optional `folder` and `note`. With a `terminal`, it also has `space` (always `reviewers`), `space_id`, and `tab` (named for the pull request, for example `demo#42`): an agent started in its own tab of the `reviewers` space, to fix the Compass and Semgrep findings of the pull request until none are left. Every pull request gets its own agent, so 4 moves at once give 4 messages. The `folder` is where the agent runs, and the `note` says how it was found: a project space, a local clone, or a new clone in `/tmp/herdr-pr-autofix`.
+A `<herdr-pr-autofix>` message comes from `herdr-pr-autofix.ts` when one of the user's pull requests moves from draft to ready. It has `result` (`started` or `error`), `repo`, `number`, `title`, `url`, and an optional `folder` and `note`. With a `terminal`, it also has `space` (always `reviewers`), `space_id`, and `pane` (named for the pull request, for example `demo#42`): an agent started in its own pane of the `reviewers` space, side by side with the other fix agents, to fix the Compass and Semgrep findings of the pull request until none are left. Every pull request gets its own agent, so 4 moves at once give 4 messages. Each agent works in its own clone in `/tmp/herdr-pr-autofix`, which is deleted when its pane closes. The `folder` is where the agent starts, and the `note` says how it was found: a project space, or its own clone.
 
-- `result: started`: call `herdr_watch` with that `terminal`, `after_turn: 0`, and the prompt `Fix Compass and Semgrep findings on <repo>#<number>`. Then write one box with three rows: the header row (the `WORKING` marker, then `Fix Compass and Semgrep findings on <repo>#<number> (reviewers)`), then `Tab <tab> · Folder <folder> · PR: [<repo>#<number>](<url>)`, then the `More:` row, with the tab as its task: `More: [reviewers, <tab>](herdr-focus://<space_id>/<terminal>)`. The agent's result comes later as a `<herdr-report>`.
-- `result: error` with a `terminal`: the tab opened, but omp did not take the task. Do not watch it. Write one box with three rows: the header row (the `ERROR` marker, then `Fix Compass and Semgrep findings on <repo>#<number> (reviewers)`), then `<note> · PR: [<repo>#<number>](<url>)`, then the `More:` row, with the tab as its task.
+- `result: started`: call `herdr_watch` with that `terminal`, `after_turn: 0`, and the prompt `Fix Compass and Semgrep findings on <repo>#<number>`. Then write one box with three rows: the header row (the `WORKING` marker, then `Fix Compass and Semgrep findings on <repo>#<number> (reviewers)`), then `Pane <pane> · Folder <folder> · PR: [<repo>#<number>](<url>)`, then the `More:` row, with the pane as its task: `More: [reviewers, <pane>](herdr-focus://<space_id>/<terminal>)`. The agent's result comes later as a `<herdr-report>`.
+- `result: error` with a `terminal`: the pane opened, but omp did not take the task. Do not watch it. Write one box with three rows: the header row (the `ERROR` marker, then `Fix Compass and Semgrep findings on <repo>#<number> (reviewers)`), then `<note> · PR: [<repo>#<number>](<url>)`, then the `More:` row, with the pane as its task.
 - `result: error` without a `terminal`: no agent started, for example because the clone failed. Write one box with three rows: the header row (the `NOT STARTED` marker, then `Fix Compass and Semgrep findings on <repo>#<number>`), then `<note> · PR: [<repo>#<number>](<url>)`, then `Action: fix the cause, then move the PR to draft and back to ready`.
 
-A `<herdr-pr-autofix-closed>` message comes from `herdr-pr-autofix.ts` when it closed the tab of a fix agent. It has `reason`, `repo`, `number`, `title`, `url`, `space`, `space_id`, `tab`, and `terminal`. The `reason` is `done` (the agent finished its run), `merged` (the pull request was merged), or `closed` (the pull request was closed without a merge). The watch of that terminal ends without a report. Write one box with two rows: the header row (the `MERGED` marker for `merged`, else the `DONE` marker, then `Closed the fix agent tab of <repo>#<number> (reviewers)`), then the reason in a few words and `PR: [<repo>#<number>](<url>)`, split by ` · `. It has no `More:` row, because the tab is gone.
+A `<herdr-pr-autofix-closed>` message comes from `herdr-pr-autofix.ts` when it closed the pane of a fix agent. It has `reason`, `repo`, `number`, `title`, `url`, `space`, `space_id`, `pane`, and `terminal`. The `reason` is `done` (the agent finished its run), `merged` (the pull request was merged), or `closed` (the pull request was closed without a merge). The watch of that terminal ends without a report. Write one box with two rows: the header row (the `MERGED` marker for `merged`, else the `DONE` marker, then `Closed the fix agent pane of <repo>#<number> (reviewers)`), then the reason in a few words and `PR: [<repo>#<number>](<url>)`, split by ` · `. It has no `More:` row, because the pane is gone.
 
-A blocked agent, or an agent with an error, keeps its tab until the pull request is merged or closed. Its `<herdr-report>` box works as for any other worker.
+A blocked agent, or an agent with an error, keeps its pane until the pull request is merged or closed. Its `<herdr-report>` box works as for any other worker.
 
-The `herdr_watch` call is the only step you take on your own. Never merge, approve, or comment on the pull request yourself, and never close a tab of the `reviewers` space yourself. The one exception is the merge of a ready pull request in a repo owned by `jaysayshello`, in "Pull requests ready to merge".
+The `herdr_watch` call is the only step you take on your own. Never merge, approve, or comment on the pull request yourself, and never close a pane of the `reviewers` space yourself. The one exception is the merge of a ready pull request in a repo owned by `jaysayshello`, in "Pull requests ready to merge".
 
 | 🟡 $\textcolor{cyan}{\textbf{WORKING}}$ Fix Compass and Semgrep findings on owner/demo#42 (reviewers) |
 |---|
-| Tab demo#42 · Folder ~/Github/owner/demo · PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
+| Pane demo#42 · Folder ~/Projects/demo-work · PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
 | More: [reviewers, demo#42](herdr-focus://sp4e5f6a7b/t9) |
 
 | ⚪ $\textcolor{gray}{\textbf{NOT STARTED}}$ Fix Compass and Semgrep findings on owner/demo#43 |
@@ -199,11 +199,11 @@ The `herdr_watch` call is the only step you take on your own. Never merge, appro
 | gh repo clone owner/demo failed: HTTP 404 · PR: [owner/demo#43](https://github.com/owner/demo/pull/43) |
 | Action: fix the cause, then move the PR to draft and back to ready |
 
-| ✅ $\textcolor{green}{\textbf{DONE}}$ Closed the fix agent tab of owner/demo#42 (reviewers) |
+| ✅ $\textcolor{green}{\textbf{DONE}}$ Closed the fix agent pane of owner/demo#42 (reviewers) |
 |---|
 | The agent finished its run · PR: [owner/demo#42](https://github.com/owner/demo/pull/42) |
 
-| 🟣 $\textcolor{magenta}{\textbf{MERGED}}$ Closed the fix agent tab of owner/demo#44 (reviewers) |
+| 🟣 $\textcolor{magenta}{\textbf{MERGED}}$ Closed the fix agent pane of owner/demo#44 (reviewers) |
 |---|
 | The PR was merged · PR: [owner/demo#44](https://github.com/owner/demo/pull/44) |
 

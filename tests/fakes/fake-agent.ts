@@ -1,4 +1,4 @@
-// A stand-in for omp and Claude Code in tests/switch.test.ts, so a switch can run without a model.
+// A stand-in for omp and Claude Code in tests/switch.test.ts and tests/autofix.test.ts, so no model runs.
 // One program, compiled twice (`bun build --compile`) to binaries named omp and claude: `ps -o comm=`
 // then reads omp or claude, where a shell script reads as bash. Its name picks the part it plays:
 //   - writes its argv to $FAKE_AGENT_LOG (default ~/fake-agent.log, one JSON line),
@@ -8,7 +8,8 @@
 //   - writes its breadcrumb (claude: through the hook in the Claude config folder,
 //     hooks/herdr-claude.sh, with a SessionStart input; directly when the hook wrote none),
 //   - reports `state=$FAKE_AGENT_STATE` (default idle) with OSC 7501, and ends on SIGTERM; claude
-//     reports `app=claude`, or `app=claude-code` (as Claude Code itself) when FAKE_AGENT_APP=claude-code,
+//     reports `app=claude`, or `app=claude-code` (as Claude Code itself) when FAKE_AGENT_APP=claude-code;
+//     with FAKE_AGENT_STATE_DIR set, it then reports working and each state written to <dir>/<terminal>,
 //   - claude only: in a folder that the Claude config does not trust, shows the trust question instead.
 import { spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -143,6 +144,19 @@ if (name === "claude" && !trusted()) {
 	if (name === "omp") process.stdout.write(`\x1b]2;${process.env.FAKE_AGENT_TITLE ?? "π > FAKE: switch test task"}\x07`);
 	const app = name === "claude" && process.env.FAKE_AGENT_APP === "claude-code" ? "claude-code" : name;
 	process.stdout.write(`\x1b]7501;state=${process.env.FAKE_AGENT_STATE ?? "idle"}:app=${app}\x07fake ${name} ready\n`);
+	// tests/autofix.test.ts: from working on, the state written to $FAKE_AGENT_STATE_DIR/<terminal>.
+	const stateDir = process.env.FAKE_AGENT_STATE_DIR;
+	if (stateDir) {
+		const file = path.join(stateDir, terminal);
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(file, "working");
+		let last = "";
+		setInterval(() => {
+			const s = fs.readFileSync(file, "utf8").trim();
+			if (s !== last) process.stdout.write(`\x1b]7501;state=${s}:app=${app}\x07`);
+			last = s;
+		}, 100);
+	}
 	for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"] as const)
 		process.on(sig, () => {
 			// The real omp adds an entry when it ends; a switch back must still see the session where it left it.
