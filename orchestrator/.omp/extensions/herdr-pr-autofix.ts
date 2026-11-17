@@ -8,10 +8,10 @@
 // tab is still open, so a push by the agent never starts a second one; a session's first poll
 // only records the drafts, unless DRAFTS has those of a poll in the last DRAFTS_MS, so a move to
 // ready during a /reload still starts an agent; only pull requests whose author is the gh user.
-// The folder, first match wins: an omp terminal's folder that has the pull request's link in a
-// tracking file (TRACKING) or is a clone of its repo on its branch (terminals in SPACE and in the
-// orchestrator's folder do not count); a local clone (cloneDirs); a new clone in CLONES. The
-// orchestrator gets a <herdr-pr-autofix> message with the folder.
+// The folder, first match wins: an omp or Claude terminal's folder that has the pull request's
+// link in a tracking file (TRACKING) or is a clone of its repo on its branch (terminals in SPACE
+// and in the orchestrator's folder do not count); a local clone (cloneDirs); a new clone in
+// CLONES. The orchestrator gets a <herdr-pr-autofix> message with the folder.
 // A tab closes, with a <herdr-pr-autofix-closed> message, when its agent is done (done or idle at
 // two polls in a row, at the same turn) or when the pull request is merged or closed, even if the
 // agent still runs. A blocked agent or one with an error keeps its tab. STATE keeps each tab, so
@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { herdrClient } from "../tools/herdr.ts";
+import { herdrClient, isAgentApp } from "../tools/herdr.ts";
 import { type OpenPr, POLL_EVENT, type Poll } from "./herdr-pr-ready.ts";
 import { FORGET_EVENT } from "./herdr-watch.ts";
 
@@ -157,12 +157,13 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 		return branch.code === 0 && branch.stdout.trim() === p.headRefName ? { clone: cwd } : undefined;
 	}
 
-	// The omp terminals outside SPACE and the orchestrator's folder, and the ids of the open tabs.
+	// The omp and Claude terminals outside SPACE and the orchestrator's folder, and the ids of the
+	// open tabs. The fix agents themselves start as omp (newTab) whatever the mode is.
 	async function scan() {
 		const { spaces, hcId } = await herdr.view();
 		// An agent in the orchestrator's folder would load the orchestrator's own rules.
 		const own = process.cwd();
-		const omp: { space: string; cwd: string }[] = [];
+		const workers: { space: string; cwd: string }[] = [];
 		await Promise.all(
 			spaces
 				.filter(space => space.name !== SPACE)
@@ -171,19 +172,19 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 						tab.terminals.map(async term => {
 							const info = await herdr.get(hcId(term.terminal)).catch(() => undefined);
 							const cwd = info?.foreground?.cwd ?? info?.cwd;
-							if (info?.status?.app === "omp" && cwd && cwd !== own) omp.push({ space: space.name, cwd });
+							if (isAgentApp(info?.status?.app) && cwd && cwd !== own) workers.push({ space: space.name, cwd });
 						}),
 					),
 				),
 		);
-		return { omp, tabs: new Set(spaces.flatMap(s => s.tabs.map(t => t.id))) };
+		return { workers, tabs: new Set(spaces.flatMap(s => s.tabs.map(t => t.id))) };
 	}
 
-	async function locate(p: OpenPr, omp: { space: string; cwd: string }[]): Promise<Where> {
+	async function locate(p: OpenPr, workers: { space: string; cwd: string }[]): Promise<Where> {
 		const repo = p.repository.nameWithOwner;
 		const checks = new Map<string, Promise<{ clone?: string } | undefined>>();
 		const hits: { space: string; cwd: string; clone?: string }[] = [];
-		for (const t of omp) {
+		for (const t of workers) {
 			if (!checks.has(t.cwd)) checks.set(t.cwd, belongs(t.cwd, p));
 			const hit = await checks.get(t.cwd);
 			if (hit) hits.push({ ...t, ...hit });
@@ -215,11 +216,11 @@ export default function herdrPrAutofix(pi: ExtensionAPI) {
 	async function startAll(prs: OpenPr[], agents: Agent[]) {
 		const runs: { p: OpenPr; o: Outcome }[] = [];
 		try {
-			const { omp, tabs } = await scan();
+			const { workers, tabs } = await scan();
 			// A push by the agent, then a move to draft and back, must not start a second agent.
 			const todo = prs.filter(p => !agents.some(a => a.url === p.url && a.tabId && tabs.has(a.tabId)));
 			const placed = await Promise.all(
-				todo.map(p => locate(p, omp).then(w => ({ p, w }), (err: unknown) => ({ p, err }))),
+				todo.map(p => locate(p, workers).then(w => ({ p, w }), (err: unknown) => ({ p, err }))),
 			);
 			for (const x of placed) {
 				if (!("w" in x)) {

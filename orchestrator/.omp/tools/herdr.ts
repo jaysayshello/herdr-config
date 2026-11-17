@@ -58,6 +58,29 @@ function result<T>(details: T) {
 	return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 }
 
+// The programs a worker terminal can run. /claude and /omp (extensions/herdr-switch.ts) write the
+// mode file, and new workers start in that mode. The PR fix agents of herdr-pr-autofix.ts stay omp.
+export const AGENT_APPS = ["omp", "claude"] as const;
+export type AgentApp = (typeof AGENT_APPS)[number];
+export const isAgentApp = (app: string | undefined): app is AgentApp => AGENT_APPS.includes(app as AgentApp);
+
+// A missing or unknown mode file means omp.
+export function readMode(): AgentApp {
+	try {
+		const word = fs.readFileSync(path.join(os.homedir(), ".local/state/herdr-switch/mode"), "utf8").trim();
+		return word === "claude" ? "claude" : "omp";
+	} catch {
+		return "omp";
+	}
+}
+
+// How a worker of app starts with its first prompt: argv for space.new and tab.new (they pass the
+// task themselves), script for the sh -lc of pane.split (the task file is $1). Claude starts as the
+// program itself (`command claude`), not as a shell alias of it.
+export function workerArgv(app: AgentApp) {
+	return { argv: [app], script: `t=$(cat "$1") && rm -f "$1" && exec ${app} "$t"` };
+}
+
 // herdr_send, herdr_new_agent and herdr_new_space take `watch` (the ~10-word summary) and start
 // the watch of extensions/herdr-watch.ts at once, which saves the model a herdr_watch call.
 // Custom tools get no pi.events, and omp loads each extension as a new module copy, so the
@@ -181,22 +204,22 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 		return { self: { terminal: self ?? null, space: selfSpace?.id ?? null }, spaces: out };
 	}
 
-	// Waits up to 45 s for omp on a new terminal to take its first prompt. It checks every 100 ms: one
-	// check (hc get) takes about 15 ms, and a 500 ms step added about 0.35 s to each start.
-	async function waitStarted(terminal: string, signal?: AbortSignal) {
+	// Waits up to 45 s for the agent (app) on a new terminal to take its first prompt. It checks every
+	// 100 ms: one check (hc get) takes about 15 ms, and a 500 ms step added about 0.35 s to each start.
+	async function waitStarted(terminal: string, signal?: AbortSignal, app: AgentApp = "omp") {
 		const deadline = Date.now() + 45_000;
 		for (;;) {
 			const info = await get(terminal, signal).catch(() => ({}) as HcGet);
 			const state = info.status?.state;
-			if (info.status?.app === "omp" && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
+			if (info.status?.app === app && ((info.turn ?? 0) > 0 || (state && state !== "idle" && state !== "done"))) return;
 			if (Date.now() >= deadline)
-				throw new Error(`omp on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
+				throw new Error(`${app} on ${terminal} did not start the task in 45 s (last state ${state ?? "unknown"}, turn ${info.turn ?? 0}). Do not start it again; read the terminal with herdr_read.`);
 			await sleep(100, signal);
 		}
 	}
 
-	// Splits the pane of terminal `beside` to the right and starts omp there with task as its first
-	// prompt, then waits for omp to take it.
+	// Splits the pane of terminal `beside` to the right and starts the agent of the current mode
+	// there with task as its first prompt, then waits for it to take it.
 	async function newAgent(beside: string, task: string, signal?: AbortSignal) {
 		if (beside === self) throw new Error("Refusing to split the orchestrator's own pane");
 		const { spaces, hcId } = await view(signal);
@@ -211,12 +234,14 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 					}
 		if (!pane) throw new Error(`Terminal ${beside} has no pane in herdr-app ls`);
 		// space.new starts its argv in a login shell, but pane.split runs it as is, with the PATH
-		// herdr-core started with, which lacks ~/.local/bin (where omp is) on a remote machine.
+		// herdr-core started with, which lacks ~/.local/bin (where omp and claude are) on a remote
+		// machine.
 		// The task goes through a file: a Mac security rule can kill `sh -lc` at once when a long
 		// argument follows it, and Herdr's core then puts a plain login shell in the new pane.
 		const file = path.join(os.tmpdir(), `herdr-task-${crypto.randomUUID()}`);
 		fs.writeFileSync(file, task, { mode: 0o600 });
-		const argv = ["sh", "-lc", 't=$(cat "$1") && rm -f "$1" && exec omp "$t"', "sh", file];
+		const app = readMode();
+		const argv = ["sh", "-lc", workerArgv(app).script, "sh", file];
 		let split: { pane: string; terminal: string };
 		try {
 			split = await runJson(
@@ -229,7 +254,7 @@ export function herdrClient(exec: CustomToolAPI["exec"]) {
 			throw err;
 		}
 		const terminal = hcId(split.terminal);
-		await waitStarted(terminal, signal);
+		await waitStarted(terminal, signal, app);
 		return { space, pane: split.pane, terminal, turn: 0 };
 	}
 
@@ -325,7 +350,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_send",
 			label: "Herdr Send",
 			description:
-				`Send a task as a prompt to an omp session in another Herdr terminal. Use this when herdr_spaces shows a matching space with an omp terminal in state idle or done. Refuses other apps, busy terminals, and the orchestrator's own terminal. With interrupt: true it also takes a working terminal: only for a clear correction of the task that terminal runs now (new or related work goes to herdr_new_agent), it stops the turn (hc interrupt, as Esc does), waits until the terminal is idle or done, and sends the text after a note that tells the worker its turn was stopped and to clean up first. It never sends to a blocked terminal, with or without interrupt: a key press can answer its dialog. Waits up to 15 s for the prompt to start and throws a 'Prompt did not start' error if it does not; then use herdr_new_agent beside that terminal and do not send again. Returns the turn before the send (pass it to herdr_wait as after_turn) and interrupted: whether a turn was stopped. ${WATCH_DOC}`,
+				`Send a task as a prompt to an agent session (omp or Claude Code) in another Herdr terminal. Use this when herdr_spaces shows a matching space with an omp or claude terminal in state idle or done. Refuses other apps, busy terminals, and the orchestrator's own terminal. With interrupt: true it also takes a working terminal: only for a clear correction of the task that terminal runs now (new or related work goes to herdr_new_agent), it stops the turn (hc interrupt, as Esc does), waits until the terminal is idle or done, and sends the text after a note that tells the worker its turn was stopped and to clean up first. It never sends to a blocked terminal, with or without interrupt: a key press can answer its dialog. Waits up to 15 s for the prompt to start and throws a 'Prompt did not start' error if it does not; then use herdr_new_agent beside that terminal and do not send again. Returns the turn before the send (pass it to herdr_wait as after_turn) and interrupted: whether a turn was stopped. ${WATCH_DOC}`,
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				terminal: pi.zod.string(),
@@ -338,7 +363,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 				let info = await get(params.terminal, signal);
 				const app = info.status?.app;
 				const state = info.status?.state;
-				if (app !== "omp") throw new Error(`Terminal ${params.terminal} runs ${app ?? "no agent"}, not omp`);
+				if (!isAgentApp(app)) throw new Error(`Terminal ${params.terminal} runs ${app ?? "no agent"}, not omp or claude`);
 				if (state === "blocked") {
 					throw new Error(`Terminal ${params.terminal} is blocked on a dialog; never send or interrupt there, tell the user to look at it`);
 				}
@@ -356,7 +381,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_new_agent",
 			label: "Herdr New Agent",
 			description:
-				`Start another omp session beside an existing one, in the same Herdr space and the same tab, as Ctrl+E does (pane.split right). The pane of terminal \`beside\` splits, and omp starts there in the same folder with task as its first prompt (a real user prompt, so the \`orchestrate\` keyword works). The existing session keeps running and stays visible. Use this for every new session in an open space: another agent, a busy space, or a failed send. Waits up to 45 s for the first turn to start. Returns the new terminal and turn 0 for herdr_wait. ${WATCH_DOC}`,
+				`Start another agent session (omp or Claude Code: the current mode, which /claude and /omp set) beside an existing one, in the same Herdr space and the same tab, as Ctrl+E does (pane.split right). The pane of terminal \`beside\` splits, and the agent starts there in the same folder with task as its first prompt (a real user prompt, so the \`orchestrate\` keyword works). The existing session keeps running and stays visible. Use this for every new session in an open space: another agent, a busy space, or a failed send. Waits up to 45 s for the first turn to start. Returns the new terminal and turn 0 for herdr_wait. ${WATCH_DOC}`,
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				beside: pi.zod.string(),
@@ -372,7 +397,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_new_space",
 			label: "Herdr New Space",
 			description:
-				`Create a temporary Herdr space and start omp there with task as its first prompt. Use this only when no open space matches the request. name must match ^[a-z0-9-]+$; the tool adds the prefix tmp-. folder defaults to /tmp/herdr-orchestrator/<name> and is created if missing. ${WATCH_DOC}`,
+				`Create a temporary Herdr space and start an agent session there (omp or Claude Code: the current mode) with task as its first prompt. Use this only when no open space matches the request. name must match ^[a-z0-9-]+$; the tool adds the prefix tmp-. folder defaults to /tmp/herdr-orchestrator/<name> and is created if missing. ${WATCH_DOC}`,
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				name: pi.zod.string(),
@@ -385,15 +410,16 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 				const name = params.name.startsWith("tmp-") ? params.name : `tmp-${params.name}`;
 				const folder = params.folder ?? `/tmp/herdr-orchestrator/${name}`;
 				fs.mkdirSync(folder, { recursive: true });
-				// The space goes on the orchestrator's machine, where omp and this folder are.
+				// The space goes on the orchestrator's machine, where the agent and this folder are.
 				const { machine, hcId } = await view(signal);
+				const argv = JSON.stringify(workerArgv(readMode()).argv);
 				const created = await runJson<Created>(
 					"herdr-app",
-					["do", "space.new", "--name", name, "--folder", folder, "--argv", '["omp"]', "--task", params.task, ...(machine ? ["--machine", machine] : [])],
+					["do", "space.new", "--name", name, "--folder", folder, "--argv", argv, "--task", params.task, ...(machine ? ["--machine", machine] : [])],
 					signal,
 				);
 				const terminal = hcId(created.terminal);
-				// omp has not started yet; the watch waits up to 60 s for its first turn.
+				// The agent has not started yet; the watch waits up to 60 s for its first turn.
 				return result({ space: created.space, tab: created.tab, terminal, ...(await startWatch(params.watch, terminal, 0, signal)) });
 			},
 		},
@@ -401,7 +427,7 @@ const factory: CustomToolFactory = (pi: CustomToolAPI) => {
 			name: "herdr_wait",
 			label: "Herdr Wait",
 			description:
-				"Block until the omp session in a terminal starts a turn after after_turn and then stops working, or until timeout_s (default 600) passes. Use this after herdr_send, herdr_new_agent, or herdr_new_space (after_turn 0 for new terminals). started false means no turn began within 60 s, so the prompt did not start. timed_out true means it is still working. Also returns the terminal's space name and space_id.",
+				"Block until the agent session (omp or Claude Code) in a terminal starts a turn after after_turn and then stops working, or until timeout_s (default 600) passes. Use this after herdr_send, herdr_new_agent, or herdr_new_space (after_turn 0 for new terminals). started false means no turn began within 60 s, so the prompt did not start. timed_out true means it is still working. Also returns the terminal's space name and space_id.",
 			loadMode: "essential",
 			parameters: pi.zod.object({
 				terminal: pi.zod.string(),
