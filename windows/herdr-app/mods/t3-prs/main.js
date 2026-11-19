@@ -28,7 +28,11 @@ const EVERY = 5000;
 
 // Windows: gh runs in WSL (machine "wsl"), where it is signed in to GitHub.
 const GH_ON = "wsl";
-const gh = (args) => exec("gh", args, { on: GH_ON });
+// `account`: null for gh's active account, else another account gh is signed in to. Its token
+// goes from `gh auth token` straight into that one gh process in WSL; the mod never sees it.
+const gh = (args, account = null) => account
+  ? exec("sh", ["-c", 't="$(gh auth token --user "$1")" || exit 1; export GH_TOKEN="$t"; shift; exec gh "$@"', "sh", account, ...args], { on: GH_ON })
+  : exec("gh", args, { on: GH_ON });
 
 // A PowerShell script as -EncodedCommand wants it: base64 of its UTF-16LE bytes.
 function encodePs(script) {
@@ -48,23 +52,30 @@ function encodePs(script) {
   }
   return out;
 }
-// Only your own open pull requests in repositories your account owns (`user:<you>`): organizations'
-// repos are left out (an organization's IP allow list can refuse this machine).
+// Your open pull requests from every account gh is signed in to. The active account: only repos
+// it owns (`user:<you>`; an organization's IP allow list can refuse this machine). Each other
+// account (a work account, say): its pull requests in any repo it can see, organizations too.
+// The accounts come from `gh auth status`, so no account names live in this public repo.
 const QUERY = `query($q: String!) { search(query: $q, type: ISSUE, first: 50) {
   nodes { ... on PullRequest { number title isDraft url headRefOid baseRefName reviewDecision mergeable mergeStateStatus updatedAt author { login } repository { name nameWithOwner }
     latestReviews(first: 20) { nodes { state author { login } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }`;
 let LOGIN = null;
-async function personalSearch() {
+async function accounts() {
   LOGIN ??= (await gql("{ viewer { login } }")).viewer.login;
-  return `is:pr is:open archived:false author:${LOGIN} user:${LOGIN} sort:updated-desc`;
+  const r = await gh(["auth", "status", "--hostname", "github.com"]);
+  const others = [...`${r.stdout}\n${r.stderr}`.matchAll(/account ([A-Za-z0-9-]+)/g)].map((m) => m[1]).filter((a) => a !== LOGIN);
+  return [
+    { account: null, q: `is:pr is:open archived:false author:${LOGIN} user:${LOGIN} sort:updated-desc` },
+    ...[...new Set(others)].map((a) => ({ account: a, q: `is:pr is:open archived:false author:${a} sort:updated-desc` })),
+  ];
 }
 
-// GitHub GraphQL through gh: `data`, or an error with gh's message.
-async function gql(query, vars = {}) {
+// GitHub GraphQL through gh (as `account`, see gh): `data`, or an error with gh's message.
+async function gql(query, vars = {}, account = null) {
   const args = ["api", "graphql", "-f", `query=${query}`];
   for (const [k, v] of Object.entries(vars)) if (v != null) args.push(typeof v === "number" ? "-F" : "-f", `${k}=${v}`);
-  const r = await gh(args);
+  const r = await gh(args, account);
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh exited with ${r.code}`);
   return JSON.parse(r.stdout).data;
 }
@@ -171,7 +182,8 @@ export default class PullRequests extends View {
   }
 
   async close(url, cx) {
-    const r = await gh(["pr", "close", url]);
+    const account = (this.prs ?? []).find((q) => q.url === url)?.account ?? null;
+    const r = await gh(["pr", "close", url], account);
     if (r.code === 0) notify({ title: "Pull request closed", body: url, level: "success" });
     else notify({ title: "Could not close the pull request", body: (r.stderr || r.stdout).trim(), level: "error" });
     await this.load(cx, true);
@@ -182,16 +194,16 @@ export default class PullRequests extends View {
     const p = (this.prs ?? []).find((q) => q.url === url);
     const what = draft ? "Move to Draft" : "Move to Ready";
     if (!p) return notify({ title: `${what} failed`, body: `Not in the list any more: ${url}`, level: "error" });
-    const r = await gh(["pr", "ready", String(p.number), "-R", p.fullRepo, ...(draft ? ["--undo"] : [])]);
+    const r = await gh(["pr", "ready", String(p.number), "-R", p.fullRepo, ...(draft ? ["--undo"] : [])], p.account);
     if (r.code === 0) notify({ title: draft ? "Moved to Draft" : "Moved to Ready", body: `${p.repo} #${p.number}`, level: "success" });
     else notify({ title: `${what} failed`, body: (r.stderr || r.stdout).trim() || `gh exited with ${r.code}`, level: "error" });
     await this.load(cx, true);
   }
 
   // The first merge method the repo permits, read once per repo.
-  async mergeMethod(repo) {
+  async mergeMethod(repo, account = null) {
     if (!this.methods.has(repo)) {
-      const r = await gh(["repo", "view", repo, "--json", METHODS.map((m) => m[0]).join(",")]);
+      const r = await gh(["repo", "view", repo, "--json", METHODS.map((m) => m[0]).join(",")], account);
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh exited with ${r.code}`);
       const allowed = JSON.parse(r.stdout);
       const m = METHODS.find(([key]) => allowed[key]);
@@ -207,7 +219,7 @@ export default class PullRequests extends View {
     if (!p || !mergeReady(p)) return notify({ title: "Merge stopped", body: `Not ready to merge any more: ${url}`, level: "error" });
     let method;
     try {
-      method = await this.mergeMethod(p.fullRepo);
+      method = await this.mergeMethod(p.fullRepo, p.account);
     } catch (e) {
       return notify({ title: "Merge failed", body: String(e.message ?? e), level: "error" });
     }
@@ -230,8 +242,8 @@ export default class PullRequests extends View {
     else if (p.head !== head) body = `New commits on ${name} since the confirmation; open the menu again`;
     if (body) return notify({ title: "Merge stopped", body, level: "error" });
     try {
-      const method = await this.mergeMethod(p.fullRepo);
-      const r = await gh(["pr", "merge", String(p.number), "-R", p.fullRepo, `--${method.flag}`, "--match-head-commit", head]);
+      const method = await this.mergeMethod(p.fullRepo, p.account);
+      const r = await gh(["pr", "merge", String(p.number), "-R", p.fullRepo, `--${method.flag}`, "--match-head-commit", head], p.account);
       if (r.code === 0) notify({ title: "Merged", body: name, level: "success" });
       else notify({ title: "Merge failed", body: (r.stderr || r.stdout).trim() || `gh exited with ${r.code}`, level: "error" });
     } catch (e) {
@@ -251,8 +263,18 @@ export default class PullRequests extends View {
     this.loading = true;
     const before = JSON.stringify([this.prs, this.error]);
     try {
-      const data = await gql(QUERY, { q: await personalSearch() });
-      this.prs = data.search.nodes.filter((p) => p?.url).map((p) => ({
+      const found = new Map();
+      const failed = [];
+      for (const { account, q } of await accounts()) {
+        try {
+          const data = await gql(QUERY, { q }, account);
+          for (const p of data.search.nodes.filter((p) => p?.url)) found.set(p.url, { ...p, account });
+        } catch (e) {
+          failed.push(`${account ?? LOGIN}: ${String(e.message ?? e)}`);
+        }
+      }
+      // One list across the accounts, most recently updated first, as each search sorts.
+      this.prs = [...found.values()].sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : -1)).map((p) => ({
         number: p.number,
         title: p.title,
         draft: p.isDraft,
@@ -263,13 +285,15 @@ export default class PullRequests extends View {
         head: p.headRefOid,
         updated: p.updatedAt,
         author: p.author?.login ?? "",
+        account: p.account,
         decision: p.reviewDecision,
         mergeable: p.mergeable,
         mergeState: p.mergeStateStatus,
         reviews: p.latestReviews.nodes.filter((v) => v.author).map((v) => ({ login: v.author.login, state: v.state })),
         ci: CI[p.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? null,
       }));
-      this.error = null;
+      // An account that failed says so; the others' pull requests still show.
+      this.error = failed.length ? failed.join("; ") : null;
     } catch (e) {
       this.error = String(e.message ?? e);
     }
@@ -280,8 +304,8 @@ export default class PullRequests extends View {
       this.manual = false;
       cx.notify();
     }
-    if (!this.error) await this.checkApprovals(cx);
-    if (!this.error) await this.checkComments(cx);
+    if (this.prs) await this.checkApprovals(cx);
+    if (this.prs) await this.checkComments(cx);
   }
 
   // Reads a pull request's comments again only when GitHub's updatedAt for it changed.
@@ -290,7 +314,7 @@ export default class PullRequests extends View {
     for (const p of this.prs ?? []) {
       if (this.comments.get(p.url)?.key === p.updated) continue;
       try {
-        this.comments.set(p.url, { key: p.updated, list: await fetchComments(gql, p.fullRepo, p.number, p.author) });
+        this.comments.set(p.url, { key: p.updated, list: await fetchComments((q, v) => gql(q, v, p.account), p.fullRepo, p.number, p.author) });
         changed = true;
       } catch (e) {
         // Keep the last list; the next change of updatedAt tries again.
@@ -328,7 +352,7 @@ export default class PullRequests extends View {
       if (this.approvals.get(p.url)?.key === key) continue;
       let result;
       try {
-        result = await checkCodeOwners(gql, { repo: p.fullRepo, number: p.number, base: p.base, author: p.author, reviews: p.reviews });
+        result = await checkCodeOwners((q, v) => gql(q, v, p.account), { repo: p.fullRepo, number: p.number, base: p.base, author: p.author, reviews: p.reviews });
       } catch (e) {
         result = { error: String(e.message ?? e) };
       }
