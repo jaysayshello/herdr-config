@@ -192,6 +192,16 @@ function clockText(date) {
   return `${hour % 12 || 12}:${minute < 10 ? "0" : ""}${minute} ${hour < 12 ? "AM" : "PM"}`;
 }
 
+// "just now", "3m ago", "2h ago": how long since a live read last succeeded.
+function formatAgo(value) {
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
+}
+
 function formatClock(value) {
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? clockText(date) : null;
@@ -385,6 +395,12 @@ export default class UsagePanel extends View {
       .border_t(1).border_color(t.border)
       .child(h_flex().min_w(0).items_center().text_size(12)
         .child(div().flex_none().font_medium().text_color(t.muted).child(name))
+        // When the subscription quota was last read (the collector reads it at most every 2 min).
+        .when(id === "claude" && quotaState === "ok" && Boolean(quota?.observedAt && formatAgo(quota.observedAt)), (el) => el.child(
+          div().id("usage-claude-polled").flex_none().ml(6).text_size(11).text_color(t.dim)
+            .tooltip(`Subscription quota last read ${formatDateTime(quota.observedAt)} · checked at most every 2 minutes`)
+            .child(`· polled ${formatAgo(quota.observedAt)}`),
+        ))
         .child(div().flex_1())
         .when(Boolean(model), (el) => el.child(
           div().min_w(0).max_w(210).truncate().text_size(11).text_color(t.dim).child(model),
