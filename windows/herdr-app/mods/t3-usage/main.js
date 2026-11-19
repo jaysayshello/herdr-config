@@ -395,12 +395,6 @@ export default class UsagePanel extends View {
       .border_t(1).border_color(t.border)
       .child(h_flex().min_w(0).items_center().text_size(12)
         .child(div().flex_none().font_medium().text_color(t.muted).child(name))
-        // When the subscription quota was last read (the collector reads it at most every 2 min).
-        .when(id === "claude" && quotaState === "ok" && Boolean(quota?.observedAt && formatAgo(quota.observedAt)), (el) => el.child(
-          div().id("usage-claude-polled").flex_none().ml(6).text_size(11).text_color(t.dim)
-            .tooltip(`Subscription quota last read ${formatDateTime(quota.observedAt)} · checked at most every 2 minutes`)
-            .child(`· polled ${formatAgo(quota.observedAt)}`),
-        ))
         .child(div().flex_1())
         .when(Boolean(model), (el) => el.child(
           div().min_w(0).max_w(210).truncate().text_size(11).text_color(t.dim).child(model),
@@ -411,7 +405,14 @@ export default class UsagePanel extends View {
       .child(div().min_w(0).truncate().text_size(13).font_medium().text_color(quotaColor).child(quotaText))
       .when(Boolean(primaryWindow), (el) => el.child(this.progressBar(t, id, primaryWindow, quotaState === "stale")))
       .when(Boolean(primaryWindow), (el) => el.child(
-        line("reset", `Resets ${formatReset(primaryWindow.resetsAt)} · ${windowLabel(primaryWindow.windowMinutes)}`, t.dim),
+        h_flex().min_w(0).items_center()
+          .child(line("reset", `Resets ${formatReset(primaryWindow.resetsAt)} · ${windowLabel(primaryWindow.windowMinutes)}`, t.dim).flex_shrink(1))
+          // When the subscription quota was last read (the collector reads it at most every 2 min).
+          .when(id === "claude" && quotaState === "ok" && Boolean(quota?.observedAt && formatAgo(quota.observedAt)), (row) => row.child(
+            div().id("usage-claude-polled").flex_none().text_size(11).text_color(t.dim)
+              .tooltip(`Subscription quota last read ${formatDateTime(quota.observedAt)} · checked at most every 2 minutes`)
+              .child(` · polled ${formatAgo(quota.observedAt)}`),
+          )),
       ))
       .when(expanded && Boolean(secondWindow), (el) => el.child(
         line("second", `${windowLabel(secondWindow.windowMinutes)} ${secondWindow.usedPercent}% used · ${secondWindow.remainingPercent}% left · resets ${formatReset(secondWindow.resetsAt)}`, t.dim),
