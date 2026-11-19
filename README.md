@@ -99,7 +99,14 @@ OpenAI quota comes from the authenticated Codex installation already managed by 
 
 When that live read fails, OpenAI falls back to the latest `rate_limits` snapshot Codex already wrote to `%USERPROFILE%\.codex\sessions` in the last seven days, an approach taken from [Alevsk/herdr-agent-usage](https://github.com/Alevsk/herdr-agent-usage) (MIT). That snapshot is a past observation, so it is always shown as stale with its time, and windows that have already reset are dropped. The same project's Claude status-line hook is the model for the capture script below, including its `<model> · <usage>` status text. Its other sources don't apply here: it is a terminal-Herdr plugin, and `claude -p "/usage"` needs a standalone `claude` CLI, which this machine doesn't have.
 
-Claude has no equivalent active fetch in this panel. After a normal Claude Code or Desktop response, the official [status-line API](https://code.claude.com/docs/en/statusline) sends its status payload to `capture-claude-quota.ps1`. The script retains only the safe model identifier/version, observation time, and the `five_hour` and `seven_day` used percentages and reset timestamps, atomically writes `%USERPROFILE%\.config\herdr-app\data\t3-usage\claude-quota.json`, and prints one concise status-line string. Configure Claude's `settings.json` with this exact command:
+**Claude subscription quota, live:** the panel asks the standalone [Claude Code CLI](https://code.claude.com/docs/en/setup) for `/usage`, the way the Agent SDK does (`claude -p --input-format stream-json --output-format stream-json`). It reads the structured `usage_report.rate_limits` from the reply. That's a local command: no model turn, no tokens, about 1–2 s. It runs quietly (`--no-session-persistence --strict-mcp-config --setting-sources project`, from `data\t3-usage\claude-cli`), so no session is saved, no MCP servers start and no hooks run. The card shows the general windows: weekly, and a session window when your plan reports one. Limits scoped to one model, like "Fable", are left out. Setup, once:
+
+1. Install the native CLI: `irm https://claude.ai/install.ps1 | iex` in PowerShell (no admin). It goes to `%USERPROFILE%\.local\bin\claude.exe`, updates itself, and that folder needs to be on your user PATH.
+2. In a new PowerShell window, `claude auth login`, and pick your **Claude.ai account (Pro/Max)**. A token reused from elsewhere doesn't carry the plan, and `/usage` then returns no limits; `claude auth status` should show `"authMethod": "claude.ai"` and your `subscriptionType`.
+
+Without the CLI, or when it reports no limits, the panel falls back to the status-line snapshot below, then says `Subscription quota unavailable`. **The Claude desktop app doesn't run status lines**, so with Desktop alone that snapshot never appears.
+
+**Status-line fallback:** after a Claude Code **terminal** response, the official [status-line API](https://code.claude.com/docs/en/statusline) sends its status payload to `capture-claude-quota.ps1`. The script retains only the safe model identifier/version, observation time, and the `five_hour` and `seven_day` used percentages and reset timestamps, atomically writes `%USERPROFILE%\.config\herdr-app\data\t3-usage\claude-quota.json`, and prints one concise status-line string. Configure Claude's `settings.json` with this exact command:
 
 ```json
 {
@@ -120,7 +127,35 @@ A Claude snapshot is current only for 60 minutes and while its reset is still in
 
 The schema-2 collector output contains only timestamps, local token counts, safe model/plan labels, quota state, and validated window percentages and resets. It never exposes authentication tokens, cookies, account IDs, prompts, tool data, raw transcript records, paths, stderr, or raw broker/protocol responses. Provider collection is isolated so a timeout, malformed source, or unavailable quota for one does not suppress the other.
 
-The panel refreshes every five minutes without overlapping collector runs and keeps only sanitized last-successful data in local storage. Its initial refresh runs from a zero-delay timer after the first render, so `herdr-app check` can render and exit without contacting a live broker. Manual refresh is the heading's refresh icon, or `herdr-app do t3-usage.refresh` (bindable in `keys.json`).
+The panel asks every minute, without overlapping collector runs, and keeps only sanitized last-successful data in local storage. Each source then has its own pace, so the faster tick doesn't hit rate limits:
+
+| Source | How often | Why |
+|---|---|---|
+| Claude subscription (`/usage`), OpenAI quota (Codex app-server) | every **2 min** | Both endpoints are rate-limited. Claude Code itself shares one read per minute and community trackers cache it for about 3 min; Codex's docs suggest 2–5 min. |
+| …after a failed read (rate limit, timeout, signed out) | 4, 8, then every **15 min** | Backs off and serves the last good value meanwhile; that value keeps its old time, so after an hour it shows as stale. State: `data\t3-usage\claude-cli-quota.json`, `openai-quota.json`. |
+| Claude API cost | every **15 min** | The data only refreshes every few hours. |
+| Today's local tokens | every minute | Local files only. |
+
+Its initial refresh runs from a zero-delay timer after the first render, so `herdr-app check` can render and exit without contacting a live broker. Manual refresh is the heading's refresh icon, or `herdr-app do t3-usage.refresh` (bindable in `keys.json`). A manual refresh re-reads what's due but doesn't skip the 2-minute pace of the live quotas.
+
+### Expand and collapse
+
+The chevron in the heading (`›` collapsed, `⌄` expanded) switches between two views. **Collapsed**, the default, shows each provider's main quota line, its bar and the reset time. **Expanded** adds the second window (OpenAI's weekly one), today's local tokens, and the Claude API cost. The block resizes with Herdr's `layout.resize` (246 px or 340 px) so the sidebar reflows. The choice is kept in the mod's local storage and re-applied on start. From a script, or bound to a key in `keys.json`: `herdr-app do t3-usage.expand` toggles it.
+
+### Claude API cost
+
+The Claude card can add one line from Anthropic's [Usage and Cost Analytics API](https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api): `API cost today $X · month $Y · through 3:00 PM`. That's what your **Claude Console (API) organization** spent: API calls, the Console, and Claude Code signed in with a Console account. It is **not** a Pro/Max subscription, whose limits stay on the quota bar above it. The API is in beta, needs an Admin API credential, and isn't available to claude.ai Team plans or individual Console accounts without an organization.
+
+The data lags: usually under 4 hours, at most 24. The "through" time is the API's `data_refreshed_at`; anything after it is missing or partial. So the collector asks at most every 15 minutes (cached in `data\t3-usage\claude-api-cost.json`). "Today" starts at local midnight and "month" at the 1st; costs are after discounts, in US dollars.
+
+It goes through [`ant`](https://github.com/anthropics/anthropic-cli), Anthropic's CLI, which the collector finds at `%LOCALAPPDATA%\Programs\ant\ant.exe` or on `PATH`. To install it, download `ant_<version>_windows_amd64.zip` from the releases, check it against `ant_<version>_checksums.txt`, and put `ant.exe` in that folder. Then pick one way to sign in:
+
+- **Browser sign-in (recommended, no long-lived key):** `& "$env:LOCALAPPDATA\Programs\ant\ant.exe" auth login --admin` in PowerShell, as an organization admin. `ant` stores and refreshes the token itself.
+- **Admin API key:** create one at [platform.claude.com/settings/admin-keys](https://platform.claude.com/settings/admin-keys), ideally with an expiry, then run `powershell -NoProfile -File "$env:USERPROFILE\.config\herdr-app\mods\t3-usage\set-claude-admin-key.ps1"` and paste it into the hidden prompt. It's saved with Windows DPAPI (this Windows user only) as `data\t3-usage\claude-admin-key.dpapi`, which is never synced, and handed to `ant` on stdin, never on its command line. `-Remove` deletes it. A stored key wins over the browser sign-in.
+
+The line says `not set up` until one of those exists, `sign-in or Admin key rejected` on a 401, `needs a Console organization` when the sign-in works but the organization can't use the Admin API, `no data yet` before the API has any for the range, and `unavailable` on other errors. The key, tokens and `ant`'s messages never reach the panel or its output.
+
+**Individual Console accounts** (named like "Jay's Individual Org") get the "needs a Console organization" state: the basic Admin endpoints answer `permission_error` ("Missing permissions"), and the analytics endpoints answer 404, even with `org:admin`. Set up an organization on [platform.claude.com/settings/organization](https://platform.claude.com/settings/organization), sign in again (`ant auth login --admin`), and refresh.
 
 ### Hide and show
 

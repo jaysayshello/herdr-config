@@ -65,10 +65,13 @@ function Add-RawLine {
 }
 
 function Invoke-Collector {
-    param([string]$FakeHome)
+    param([string]$FakeHome, [string]$FakeAnt, [string]$FakeClaude)
 
     # Live quota is always skipped: the check never starts a broker or touches the network.
-    $lines = @(& $collector -HomePath $FakeHome -NowUtc $fixedNow -PeriodStartUtc $fixedPeriodStart -SkipLiveQuota)
+    $antArgs = @{}
+    if ($FakeAnt) { $antArgs['AntPath'] = $FakeAnt }
+    if ($FakeClaude) { $antArgs['ClaudePath'] = $FakeClaude }
+    $lines = @(& $collector -HomePath $FakeHome -NowUtc $fixedNow -PeriodStartUtc $fixedPeriodStart -SkipLiveQuota @antArgs)
     Assert-Equal $lines.Count 1 'collector must emit exactly one stdout object'
     Assert-True (-not $lines[0].Contains("`r") -and -not $lines[0].Contains("`n")) 'collector JSON must be compact'
     try {
@@ -277,7 +280,8 @@ try {
     $full = Invoke-Collector $fullHome
     Assert-Envelope $full
     # Only today's records count: yesterday's (before the fixed period start) are excluded.
-    Assert-Properties $full.claude @('state', 'totalTokens', 'inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'model', 'sourceUpdatedAt', 'quota') 'unexpected Claude success schema'
+    Assert-Properties $full.claude @('state', 'totalTokens', 'inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'model', 'sourceUpdatedAt', 'quota', 'apiCost') 'unexpected Claude success schema'
+    Assert-Equal $full.claude.apiCost.state 'unavailable' 'API cost is skipped without ant in the check'
     Assert-Equal $full.claude.state 'ok' 'Claude state'
     Assert-Equal $full.claude.inputTokens 5 'Claude input aggregation'
     Assert-Equal $full.claude.cacheCreationTokens 0 'Claude cache creation aggregation'
@@ -322,7 +326,7 @@ try {
     $null = & $capture -HomePath $emptyHome -NowUtc $fixedNow.AddHours(-2) -InputJson $staleInput
     $empty = Invoke-Collector $emptyHome
     Assert-Envelope $empty
-    Assert-Properties $empty.claude @('state', 'quota') 'empty Claude must not carry metrics'
+    Assert-Properties $empty.claude @('state', 'quota', 'apiCost') 'empty Claude must not carry metrics'
     Assert-Properties $empty.openai @('state', 'quota') 'unavailable OpenAI must not carry metrics'
     Assert-Equal $empty.claude.state 'empty' 'malformed readable Claude source should be empty'
     Assert-Equal $empty.openai.state 'unavailable' 'missing OpenAI source should be unavailable'
@@ -357,6 +361,122 @@ try {
     Assert-Properties $isolated.openai @('state', 'quota') 'errored OpenAI must not carry metrics'
     Assert-Equal $isolated.openai.state 'error' 'one unreadable OpenAI source must error despite another readable source'
     Assert-Equal $isolated.claude.quota.state 'unavailable' 'no Claude snapshot is unavailable, not 0%'
+
+    # Claude API cost through a stand-in for ant: today and month pages (cents -> dollars), the
+    # Admin key only on stdin (never in argv or the output), the 15-minute cache, and a rejected
+    # key reported as auth_failed.
+    $antHome = Join-Path $fixtureRoot 'ant-home'
+    $antDir = Join-Path $fixtureRoot 'fake-ant'
+    $antData = Join-Path $antHome '.config\herdr-app\data\t3-usage'
+    [void][IO.Directory]::CreateDirectory($antDir)
+    [void][IO.Directory]::CreateDirectory($antData)
+    $fakeAnt = Join-Path $antDir 'ant.cmd'
+    [IO.File]::WriteAllText($fakeAnt, (@(
+        '@echo off',
+        'echo %*>>"%~dp0argv.log"',
+        'more >>"%~dp0stdin.log"',
+        'if exist "%~dp0reject" (echo API error 401 authentication_error 1>&2 & exit /b 1)',
+        'if exist "%~dp0noorg" (echo {"type":"error","error":{"type":"not_found_error","message":"Not found"}} & echo GET analytics/cost: 404 Not Found 1>&2 & exit /b 1)',
+        'echo %* | find "2026-11-09T12:30:00Z" >nul && (type "%~dp0today.json") || (type "%~dp0month.json")'
+    ) -join "`r`n"), [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $antDir 'today.json'), '{"data":[{"cost":{"currency":"USD","amount":"12345.000000"}},{"cost":{"currency":"USD","amount":"55.500000"}}],"has_more":false,"data_refreshed_at":"2026-11-10T09:00:00Z"}', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $antDir 'month.json'), '{"data":[{"cost":{"currency":"USD","amount":"4567800.000000"}}],"has_more":false,"data_refreshed_at":"2026-11-10T08:00:00Z"}', [Text.Encoding]::ASCII)
+    $secret = 'sk-ant-admin01-CHECK_SECRET_SENTINEL'
+    $secure = ConvertTo-SecureString $secret -AsPlainText -Force
+    Set-Content -LiteralPath (Join-Path $antData 'claude-admin-key.dpapi') -Value ($secure | ConvertFrom-SecureString) -NoNewline
+
+    $antRun = Invoke-Collector $antHome $fakeAnt
+    $cost = $antRun.claude.apiCost
+    Assert-Properties $cost @('state', 'todayUsd', 'monthUsd', 'refreshedAt') 'unexpected API cost schema'
+    Assert-Equal $cost.state 'ok' 'API cost state'
+    Assert-Equal $cost.todayUsd 124.01 'today: cents summed across rows, then dollars'
+    Assert-Equal $cost.monthUsd 45678 'month in dollars'
+    Assert-True ($cost.refreshedAt.StartsWith('2026-11-10T08:00:00')) 'through = the older of the two refresh times'
+    $argv = [IO.File]::ReadAllText((Join-Path $antDir 'argv.log'))
+    Assert-True ($argv.Contains('--api-key-stdin') -and $argv.Contains('beta:organization:analytics:cost list') -and $argv.Contains('--format raw')) 'ant gets the cost list call with the key on stdin'
+    Assert-True (-not $argv.Contains('CHECK_SECRET_SENTINEL')) 'the key never appears in ant arguments'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $antDir 'stdin.log')).Contains($secret)) 'the key reaches ant on stdin'
+    Assert-True (-not (($antRun | ConvertTo-Json -Depth 10 -Compress).Contains('CHECK_SECRET_SENTINEL'))) 'the key never appears in collector output'
+
+    # Within 15 minutes the cache answers, so ant isn't called again.
+    $callsBefore = @([IO.File]::ReadAllLines((Join-Path $antDir 'argv.log'))).Count
+    $cachedRun = Invoke-Collector $antHome $fakeAnt
+    Assert-Equal $cachedRun.claude.apiCost.todayUsd 124.01 'cached today'
+    Assert-Equal @([IO.File]::ReadAllLines((Join-Path $antDir 'argv.log'))).Count $callsBefore 'cache avoids a second ant call'
+
+    # A rejected key: auth_failed, and no metrics.
+    Remove-Item -LiteralPath (Join-Path $antData 'claude-api-cost.json')
+    [IO.File]::WriteAllText((Join-Path $antDir 'reject'), '')
+    $rejected = Invoke-Collector $antHome $fakeAnt
+    Assert-Properties $rejected.claude.apiCost @('state') 'a rejected key carries no metrics'
+    Assert-Equal $rejected.claude.apiCost.state 'auth_failed' 'a 401 from ant is auth_failed'
+
+    # Signed in, but an organization without the Admin API (as an individual Console account
+    # answers): org_required, not auth_failed.
+    Remove-Item -LiteralPath (Join-Path $antDir 'reject')
+    [IO.File]::WriteAllText((Join-Path $antDir 'noorg'), '')
+    $noOrg = Invoke-Collector $antHome $fakeAnt
+    Assert-Properties $noOrg.claude.apiCost @('state') 'an organization without the Admin API carries no metrics'
+    Assert-Equal $noOrg.claude.apiCost.state 'org_required' 'a 404 from the analytics endpoint is org_required'
+
+    # Claude subscription quota through a stand-in for the Claude Code CLI: the usage_report's
+    # general windows (weekly, session) become quota windows; a model-scoped limit and an
+    # already-reset window are left out; it wins over the status-line snapshot.
+    $cliHome = Join-Path $fixtureRoot 'cli-home'
+    $cliDir = Join-Path $fixtureRoot 'fake-claude'
+    [void][IO.Directory]::CreateDirectory($cliDir)
+    [void][IO.Directory]::CreateDirectory((Join-Path $cliHome '.claude\projects'))
+    $fakeClaude = Join-Path $cliDir 'claude.cmd'
+    [IO.File]::WriteAllText($fakeClaude, (@(
+        '@echo off',
+        'echo %*>>"%~dp0argv.log"',
+        'more >>"%~dp0stdin.log"',
+        'type "%~dp0stream.jsonl"'
+    ) -join "`r`n"), [Text.Encoding]::ASCII)
+    $report = [ordered]@{ type = 'result'; usage_report = [ordered]@{ rate_limits = [ordered]@{ limits = @(
+        [ordered]@{ kind = 'weekly_all'; group = 'weekly'; percent = 7; resets_at = '2026-11-15T22:00:00.350266+00:00'; scope = $null; is_active = $true },
+        [ordered]@{ kind = 'weekly_scoped'; group = 'weekly'; percent = 55; resets_at = '2026-11-15T22:00:00+00:00'; scope = [ordered]@{ model = [ordered]@{ display_name = 'Fable' } } },
+        [ordered]@{ kind = 'session'; group = 'session'; percent = 42.5; resets_at = '2026-11-10T14:00:00+00:00'; scope = $null },
+        [ordered]@{ kind = 'session'; group = 'session'; percent = 99; resets_at = '2026-11-10T11:00:00+00:00'; scope = $null }
+    ) } } }
+    [IO.File]::WriteAllText((Join-Path $cliDir 'stream.jsonl'), ('{"type":"system","subtype":"init"}' + "`r`n" + ($report | ConvertTo-Json -Depth 8 -Compress) + "`r`n"), [Text.Encoding]::ASCII)
+    $null = & $capture -HomePath $cliHome -NowUtc $fixedNow.AddMinutes(-5) -InputJson ('{"rate_limits":{"five_hour":{"used_percentage":80,"resets_at":' + (Epoch '2026-11-10T15:00:00Z') + '}}}')
+
+    $cliRun = Invoke-Collector $cliHome '' $fakeClaude
+    $q = $cliRun.claude.quota
+    Assert-Equal $q.state 'ok' 'CLI quota is current'
+    Assert-Equal @($q.windows).Count 2 'session and weekly windows, scoped limit left out'
+    Assert-Equal $q.windows[0].windowMinutes 300 'session window first'
+    Assert-Equal $q.windows[0].usedPercent 42.5 'session used (the already-reset one is skipped, not the snapshot 80%)'
+    Assert-Equal $q.windows[1].windowMinutes 10080 'weekly window'
+    Assert-Equal $q.windows[1].usedPercent 7 'weekly used'
+    $cliArgv = [IO.File]::ReadAllText((Join-Path $cliDir 'argv.log'))
+    Assert-True ($cliArgv.Contains('--no-session-persistence') -and $cliArgv.Contains('--strict-mcp-config') -and $cliArgv.Contains('--input-format stream-json')) 'CLI runs quietly, SDK-style'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $cliDir 'stdin.log')).Contains('"content":"/usage"')) 'CLI receives /usage on stdin'
+
+    # Throttle: a second run within 2 minutes serves the saved value without calling the CLI.
+    $cliState = Join-Path $cliHome '.config\herdr-app\data\t3-usage\claude-cli-quota.json'
+    $cliCalls = @([IO.File]::ReadAllLines((Join-Path $cliDir 'argv.log'))).Count
+    $throttled = Invoke-Collector $cliHome '' $fakeClaude
+    Assert-Equal $throttled.claude.quota.windows[0].usedPercent 42.5 'throttled run serves the saved value'
+    Assert-Equal @([IO.File]::ReadAllLines((Join-Path $cliDir 'argv.log'))).Count $cliCalls 'no CLI call within 2 minutes'
+
+    # When due but failing (rate-limited: no limits in the reply), the last good value stays and
+    # the next try waits twice as long (4 minutes after one failure).
+    [IO.File]::WriteAllText((Join-Path $cliDir 'stream.jsonl'), '{"type":"result"}', [Text.Encoding]::ASCII)
+    $state = [IO.File]::ReadAllText($cliState) | ConvertFrom-Json
+    $state.nextAt = '2026-11-10T11:00:00Z'
+    [IO.File]::WriteAllText($cliState, ($state | ConvertTo-Json -Depth 8 -Compress))
+    $backedOff = Invoke-Collector $cliHome '' $fakeClaude
+    Assert-Equal $backedOff.claude.quota.windows[0].usedPercent 42.5 'a failed read keeps the last good value'
+    $after = [IO.File]::ReadAllText($cliState) | ConvertFrom-Json
+    Assert-Equal ([int]$after.failures) 1 'one failure recorded'
+    Assert-True ($after.nextAt.StartsWith('2026-11-10T12:04:00')) 'next try backs off to 4 minutes'
+
+    # With nothing good saved, a failing CLI falls back to the status-line snapshot.
+    Remove-Item -LiteralPath $cliState
+    $fallback = Invoke-Collector $cliHome '' $fakeClaude
+    Assert-Equal $fallback.claude.quota.windows[0].usedPercent 80 'falls back to the status-line snapshot'
 
     exit 0
 }

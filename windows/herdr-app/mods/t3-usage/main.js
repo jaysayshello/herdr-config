@@ -2,9 +2,17 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { appHome, exec, layout, nextCommand, run, theme } from "herdr";
 
-const EVERY = 5 * 60 * 1000;
+// The panel asks every minute; the collector decides what's due (live quotas every 2 minutes
+// with backoff, API cost every 15, local tokens every time), so this doesn't hit rate limits.
+const EVERY = 60 * 1000;
+// Collapsed: each provider's main quota line, bar and reset. Expanded adds the second window,
+// today's tokens and the API cost; the block grows with layout.resize, and the choice is kept.
+const COLLAPSED_PX = 246;
+const EXPANDED_PX = 340;
+const EXPANDED_KEY = "t3-usage:expanded";
 const STALE_AFTER = 60 * 60 * 1000;
-const EXEC_TIMEOUT = 20 * 1000;
+// The collector may ask Codex (about 12 s at most) and, every 15 minutes, `ant` twice.
+const EXEC_TIMEOUT = 60 * 1000;
 const CACHE_KEY = "t3-usage:schema-2";
 const LOCAL_STATES = new Set(["ok", "empty", "unavailable", "error"]);
 const QUOTA_STATES = new Set(["ok", "stale", "unavailable", "error"]);
@@ -104,6 +112,22 @@ function sanitizeProvider(value, tokenFields, includeTier = false) {
   return provider;
 }
 
+// The Claude card's "API cost" line (Usage and Cost Analytics API through `ant`, see collect-usage.ps1).
+const API_COST_STATES = new Set(["ok", "unconfigured", "unavailable", "auth_failed", "org_required", "error"]);
+
+function sanitizeApiCost(value) {
+  if (!value || typeof value !== "object" || !API_COST_STATES.has(value.state)) return null;
+  if (value.state !== "ok") return { state: value.state };
+  const usd = (n) => (typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null);
+  const todayUsd = usd(value.todayUsd);
+  const monthUsd = usd(value.monthUsd);
+  if (todayUsd == null || monthUsd == null) return { state: "error" };
+  const apiCost = { state: "ok", todayUsd, monthUsd };
+  const refreshedAt = safeDate(value.refreshedAt);
+  if (refreshedAt) apiCost.refreshedAt = refreshedAt;
+  return apiCost;
+}
+
 function sanitizeUsage(value) {
   const generatedAt = safeDate(value?.generatedAt);
   const periodStart = safeDate(value?.periodStart);
@@ -117,7 +141,7 @@ function sanitizeUsage(value) {
     generatedAt,
     periodStart,
     periodEnd,
-    claude: sanitizeProvider(value.claude, CLAUDE_TOKENS),
+    claude: { ...sanitizeProvider(value.claude, CLAUDE_TOKENS), apiCost: sanitizeApiCost(value.claude?.apiCost) },
     openai: sanitizeProvider(value.openai, OPENAI_TOKENS, true),
   };
 }
@@ -129,6 +153,22 @@ function cachedUsage() {
   } catch (_error) {
     return null;
   }
+}
+
+// No Intl in Herdr's runtime: dollars and cents by hand, thousands grouped above $1,000.
+function formatUsd(value) {
+  if (value < 1000) return `$${value.toFixed(2)}`;
+  return `$${String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
+}
+
+function apiCostText(apiCost) {
+  if (!apiCost || apiCost.state === "unavailable") return null;
+  if (apiCost.state === "unconfigured") return "API cost: not set up (README: Claude API cost)";
+  if (apiCost.state === "auth_failed") return "API cost: sign-in or Admin key rejected";
+  if (apiCost.state === "org_required") return "API cost: needs a Console organization (README)";
+  if (apiCost.state === "error") return "API cost unavailable";
+  if (!apiCost.refreshedAt) return "API cost: no data yet";
+  return `API cost today ${formatUsd(apiCost.todayUsd)} · month ${formatUsd(apiCost.monthUsd)} · through ${formatReset(apiCost.refreshedAt)}`;
 }
 
 function compactTokens(value) {
@@ -150,6 +190,16 @@ function clockText(date) {
   const hour = date.getHours();
   const minute = date.getMinutes();
   return `${hour % 12 || 12}:${minute < 10 ? "0" : ""}${minute} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+// "just now", "3m ago", "2h ago": how long since a live read last succeeded.
+function formatAgo(value) {
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
 }
 
 function formatClock(value) {
@@ -204,6 +254,9 @@ export default class UsagePanel extends View {
     this.data = cachedUsage();
     this.loading = false;
     this.failed = false;
+    this.expanded = localStorage.getItem(EXPANDED_KEY) === "1";
+    // The block's height follows the saved choice (also after a layout reset).
+    cx.timer.after(0, () => run("layout.resize", { id: NODE, px: this.expanded ? EXPANDED_PX : COLLAPSED_PX }));
     // Herdr keeps a hidden block's copy and its timers alive, so each tick checks first and
     // skips the collector while the panel is hidden; showing it again refreshes at once.
     this.skipped = false;
@@ -211,7 +264,9 @@ export default class UsagePanel extends View {
     cx.timer.after(0, (cx) => this.poll(cx));
     cx.spawn(async (cx) => {
       for (;;) {
-        if (await nextCommand() === "refresh") this.refresh(cx, true);
+        const command = await nextCommand();
+        if (command === "refresh") this.refresh(cx, true);
+        else if (command === "expand") this.toggleExpanded(cx);
       }
     });
   }
@@ -222,6 +277,13 @@ export default class UsagePanel extends View {
       return;
     }
     this.refresh(cx);
+  }
+
+  toggleExpanded(cx) {
+    this.expanded = !this.expanded;
+    localStorage.setItem(EXPANDED_KEY, this.expanded ? "1" : "0");
+    run("layout.resize", { id: NODE, px: this.expanded ? EXPANDED_PX : COLLAPSED_PX });
+    cx.notify();
   }
 
 
@@ -272,7 +334,7 @@ export default class UsagePanel extends View {
       : t.accent;
     return h_flex()
       .id(`usage-${id}-quota-progress`)
-      .w_full().h(5).flex_none().overflow_hidden().rounded_full().bg(t.border)
+      .w_full().h(6).flex_none().overflow_hidden().rounded_full().bg(t.border)
       .accessibility_label(`${window.usedPercent}% used, ${window.remainingPercent}% left`)
       .when(window.usedPercent > 0, (el) => el.child(
         div().h_full().flex_grow(window.usedPercent).bg(fill),
@@ -315,38 +377,48 @@ export default class UsagePanel extends View {
     const quotaText = trustedQuota
       ? `${primaryWindow.usedPercent}% used · ${primaryWindow.remainingPercent}% left`
       : quotaState === "unavailable"
-        ? (id === "claude" ? "Quota appears after your next Claude reply" : "Provider quota unavailable")
+        ? (id === "claude" ? "Subscription quota unavailable (needs `claude auth login`)" : "Provider quota unavailable")
       : quotaState === "error" ? "Could not read provider quota"
       : "Loading provider quota…";
     const quotaColor = quotaState === "error" ? t.ansi1
       : quotaState === "ok" ? t.foreground : t.muted;
     const localColor = localState === "error" ? t.ansi1 : t.dim;
+    const costText = id === "claude" ? apiCostText(provider?.apiCost) : null;
+    const costColor = provider?.apiCost?.state === "ok" ? t.muted
+      : provider?.apiCost?.state === "auth_failed" ? t.ansi1 : t.dim;
+    const line = (key, text, color) => div().id(`usage-${id}-${key}`).min_w(0).truncate().text_size(11).text_color(color).child(text);
+    const expanded = this.expanded;
     return v_flex()
       .id(`usage-${id}`)
-      .flex_1().min_h(0)
-      .px(12).py(4).gap(1)
+      .flex_none()
+      .px(14).pt(10).pb(12).gap(5)
       .border_t(1).border_color(t.border)
-      .child(h_flex().min_w(0).items_center().text_size(11)
+      .child(h_flex().min_w(0).items_center().text_size(12)
         .child(div().flex_none().font_medium().text_color(t.muted).child(name))
         .child(div().flex_1())
         .when(Boolean(model), (el) => el.child(
-          div().min_w(0).max_w(210).truncate().text_color(t.dim).child(model),
+          div().min_w(0).max_w(210).truncate().text_size(11).text_color(t.dim).child(model),
         )))
       .when(quotaState === "stale", (el) => el.child(
-        div().min_w(0).truncate().text_size(10).text_color(t.muted)
-          .child(`Stale · last observed ${formatDateTime(quota.observedAt)}`),
+        line("stale", `Stale · last observed ${formatDateTime(quota.observedAt)}`, t.muted),
       ))
-      .child(div().min_w(0).truncate().text_size(11).font_medium().text_color(quotaColor).child(quotaText))
+      .child(div().min_w(0).truncate().text_size(13).font_medium().text_color(quotaColor).child(quotaText))
       .when(Boolean(primaryWindow), (el) => el.child(this.progressBar(t, id, primaryWindow, quotaState === "stale")))
       .when(Boolean(primaryWindow), (el) => el.child(
-        div().min_w(0).truncate().text_size(10).text_color(t.dim)
-          .child(`Resets ${formatReset(primaryWindow.resetsAt)} · ${windowLabel(primaryWindow.windowMinutes)}`),
+        h_flex().min_w(0).items_center()
+          .child(line("reset", `Resets ${formatReset(primaryWindow.resetsAt)} · ${windowLabel(primaryWindow.windowMinutes)}`, t.dim).flex_shrink(1))
+          // When the subscription quota was last read (the collector reads it at most every 2 min).
+          .when(id === "claude" && quotaState === "ok" && Boolean(quota?.observedAt && formatAgo(quota.observedAt)), (row) => row.child(
+            div().id("usage-claude-polled").flex_none().text_size(11).text_color(t.dim)
+              .tooltip(`Subscription quota last read ${formatDateTime(quota.observedAt)} · checked at most every 2 minutes`)
+              .child(` · polled ${formatAgo(quota.observedAt)}`),
+          )),
       ))
-      .when(Boolean(secondWindow), (el) => el.child(
-        div().min_w(0).truncate().text_size(10).text_color(t.dim)
-          .child(`${windowLabel(secondWindow.windowMinutes)} ${secondWindow.usedPercent}% used · ${secondWindow.remainingPercent}% left · resets ${formatReset(secondWindow.resetsAt)}`),
+      .when(expanded && Boolean(secondWindow), (el) => el.child(
+        line("second", `${windowLabel(secondWindow.windowMinutes)} ${secondWindow.usedPercent}% used · ${secondWindow.remainingPercent}% left · resets ${formatReset(secondWindow.resetsAt)}`, t.dim),
       ))
-      .child(div().min_w(0).truncate().text_size(10).text_color(localColor).child(localText));
+      .when(expanded, (el) => el.child(line("local", localText, localColor)))
+      .when(expanded && Boolean(costText), (el) => el.child(line("cost", costText, costColor)));
   }
 
   render(cx) {
@@ -366,11 +438,20 @@ export default class UsagePanel extends View {
       .text_size(12)
       .child(h_flex()
         .id("usage-heading")
-        .h(35).flex_none()
-        .pl(16).pr(10).items_center()
-        .child(v_flex().flex_1().min_w(0)
-          .child(div().font_medium().text_color(t.muted).child("AI usage"))
-          .child(div().min_w(0).truncate().text_size(10).text_color(this.failed ? t.ansi1 : t.dim).child(this.headingStatus())))
+        .h(40).flex_none()
+        .pl(16).pr(10).gap(2).items_center()
+        .child(v_flex().flex_1().min_w(0).gap(1)
+          .child(div().text_size(13).font_medium().text_color(t.muted).child("AI usage"))
+          .child(div().min_w(0).truncate().text_size(11).text_color(this.failed ? t.ansi1 : t.dim).child(this.headingStatus())))
+        .child(div()
+          .id("usage-expand")
+          .size(26).flex_none().flex().items_center().justify_center().rounded(6)
+          .role("button").accessibility_label(this.expanded ? "Show less AI usage" : "Show more AI usage")
+          .tooltip(this.expanded ? "Show less" : "Show more: second window, today's tokens, API cost")
+          .text_color(t.dim)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_event, cx) => this.toggleExpanded(cx))
+          .child(svg(`mods/workspace-chrome/chevron-${this.expanded ? "down" : "right"}.svg`).size(13)))
         .child(div()
           .id("usage-refresh")
           .size(26).flex_none().flex().items_center().justify_center().rounded(6)

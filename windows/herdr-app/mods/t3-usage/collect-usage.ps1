@@ -2,7 +2,11 @@ param(
     [string]$HomePath = $env:USERPROFILE,
     [datetime]$NowUtc = [datetime]::UtcNow,
     [datetime]$PeriodStartUtc,
-    [switch]$SkipLiveQuota
+    [switch]$SkipLiveQuota,
+    # Tests only: a stand-in for ant.exe. Without it, -SkipLiveQuota also skips API cost.
+    [string]$AntPath,
+    # Tests only: a stand-in for claude.exe. Without it, -SkipLiveQuota also skips the CLI.
+    [string]$ClaudePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1132,6 +1136,45 @@ function Get-CodexRolloutQuota {
     }
 }
 
+# Live quota reads (Claude's /usage, Codex's account/rateLimits/read) reach rate-limited
+# endpoints, so each runs at most every 2 minutes however often the panel polls. A failed read
+# (rate limit, timeout, signed out) doubles the wait, up to 15 minutes, and the last good value
+# is served meanwhile; its observedAt stays the old time, so the panel marks it stale after an
+# hour. State per source: data\t3-usage\<name>.json (next due time, failures, last good value).
+$LiveEvery = [timespan]::FromMinutes(2)
+$LiveBackoffMax = [timespan]::FromMinutes(15)
+
+function Invoke-Throttled {
+    param(
+        [string]$HomeRoot,
+        [string]$Name,
+        [datetimeoffset]$Now,
+        [scriptblock]$Fetch
+    )
+
+    $dir = [IO.Path]::Combine($HomeRoot, '.config', 'herdr-app', 'data', 't3-usage')
+    $path = Join-Path $dir "$Name.json"
+    $saved = $null
+    try { if ([IO.File]::Exists($path)) { $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json } } catch { $saved = $null }
+    $nextAt = if ($saved) { Convert-ToUtcDateTimeOffset $saved.nextAt } else { $null }
+    $lastGood = if ($saved) { $saved.value } else { $null }
+    if ($null -ne $nextAt -and $Now -lt $nextAt -and ($nextAt - $Now) -le $LiveBackoffMax) { return $lastGood }
+
+    $result = $null
+    try { $result = & $Fetch } catch { $result = $null }
+    $ok = $null -ne $result -and $result.Quota.state -eq 'ok'
+    $failures = if ($ok) { 0 } elseif ($saved) { [int]$saved.failures + 1 } else { 1 }
+    $wait = if ($ok) { $LiveEvery } else { [timespan]::FromTicks([Math]::Min($LiveEvery.Ticks * [Math]::Pow(2, $failures), $LiveBackoffMax.Ticks)) }
+    $value = if ($ok) { $result } else { $lastGood }
+    try {
+        [void][IO.Directory]::CreateDirectory($dir)
+        $state = [ordered]@{ nextAt = $Now.Add($wait).ToString('o', [Globalization.CultureInfo]::InvariantCulture); failures = $failures; value = $value }
+        [IO.File]::WriteAllText($path, ($state | ConvertTo-Json -Depth 8 -Compress))
+    }
+    catch {}
+    return $value
+}
+
 function Get-OpenAiQuota {
     param(
         [string]$HomeRoot,
@@ -1139,15 +1182,17 @@ function Get-OpenAiQuota {
         [switch]$Skip
     )
 
-    $live = Get-OpenAiLiveQuota -HomeRoot $HomeRoot -Now $Now -Skip:$Skip
-    if ($live.Quota.state -eq 'ok') {
+    $live = if ($Skip) { Get-OpenAiLiveQuota -HomeRoot $HomeRoot -Now $Now -Skip }
+        else { Invoke-Throttled -HomeRoot $HomeRoot -Name 'openai-quota' -Now $Now -Fetch { Get-OpenAiLiveQuota -HomeRoot $HomeRoot -Now $Now } }
+    if ($null -ne $live -and $live.Quota.state -eq 'ok') {
         return $live
     }
     $fallback = Get-CodexRolloutQuota -HomeRoot $HomeRoot -Now $Now
     if ($null -ne $fallback) {
         return $fallback
     }
-    return $live
+    if ($null -ne $live) { return $live }
+    return [pscustomobject]@{ Quota = New-EmptyQuota -State error; Model = $null }
 }
 
 function Get-OpenAiLiveQuota {
@@ -1207,6 +1252,236 @@ function Get-OpenAiLiveQuota {
     }
 }
 
+# Claude API cost (Usage and Cost Analytics API, through Anthropic's `ant` CLI): what the
+# Console organization spent today and this month. It covers API and Console usage, not a
+# Pro/Max subscription. The API's data lags (usually under 4 h, up to 24 h), so it's fetched at
+# most every 15 minutes and shown with its `data_refreshed_at`.
+# Credentials: an Admin API key stored by set-claude-admin-key.ps1 (DPAPI, this Windows user
+# only) and handed to ant on stdin, never on the command line; otherwise ant's own sign-in
+# (`ant auth login --admin`). The key and ant's messages are never part of the output.
+$ApiCostEvery = [timespan]::FromMinutes(15)
+$AntTimeoutMs = 15000
+
+function Find-Ant {
+    if ($AntPath) { return $AntPath }
+    $installed = Join-Path $env:LOCALAPPDATA 'Programs\ant\ant.exe'
+    if ([IO.File]::Exists($installed)) { return $installed }
+    $onPath = Get-Command ant.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Get-AdminKey {
+    param([string]$DataDir)
+    $file = Join-Path $DataDir 'claude-admin-key.dpapi'
+    if (-not [IO.File]::Exists($file)) { return $null }
+    $secure = [IO.File]::ReadAllText($file).Trim() | ConvertTo-SecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+}
+
+function Invoke-Ant {
+    param([string]$Ant, [string]$Arguments, [string]$StandardInput)
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Ant
+    $startInfo.Arguments = $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if ($StandardInput) { $process.StandardInput.Write($StandardInput) }
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit($AntTimeoutMs)) {
+            try { $process.Kill() } catch {}
+            throw 'ant timed out.'
+        }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            # ant's output only decides which kind of failure this was; its text goes nowhere.
+            # The error JSON lands on stdout and the status line on stderr, so both are read.
+            $said = $stdout.Result + "`n" + $stderr.Result
+            # Signed in, but the organization can't use the Admin API (an individual Console
+            # account answers "Missing permissions" and 404 on the analytics endpoints).
+            if ($said -match 'permission_error|not_found_error|\b404 Not Found\b') { throw 'ant org not available.' }
+            if ($said -match '\b401\b|authentication_error|not configured|ant auth login') { throw 'ant auth failed.' }
+            throw 'ant failed.'
+        }
+        return $stdout.Result
+    }
+    finally { $process.Dispose() }
+}
+
+function Read-CostPage {
+    param([string]$Json)
+    $page = $Json | ConvertFrom-Json -ErrorAction Stop
+    [decimal]$cents = 0
+    foreach ($row in @($page.data | Where-Object { $null -ne $_ })) {
+        $amount = Get-JsonProperty (Get-JsonProperty $row 'cost') 'amount'
+        [decimal]$value = 0
+        if (-not [decimal]::TryParse([string]$amount, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -or $value -lt 0) {
+            throw 'Invalid cost amount.'
+        }
+        $cents += $value
+    }
+    return [pscustomobject]@{
+        Usd = [double][Math]::Round($cents / 100, 2, [MidpointRounding]::AwayFromZero)
+        RefreshedAt = Convert-ToUtcDateTimeOffset (Get-JsonProperty $page 'data_refreshed_at')
+    }
+}
+
+function Get-ClaudeApiCost {
+    param(
+        [string]$HomeRoot,
+        [datetimeoffset]$Now,
+        [datetimeoffset]$DayStart,
+        [switch]$Skip
+    )
+
+    if ($Skip -and -not $AntPath) { return [ordered]@{ state = 'unavailable' } }
+    $dataDir = [IO.Path]::Combine($HomeRoot, '.config', 'herdr-app', 'data', 't3-usage')
+    $cachePath = Join-Path $dataDir 'claude-api-cost.json'
+    $iso = { param($t) $t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    try {
+        if ([IO.File]::Exists($cachePath)) {
+            $cached = [IO.File]::ReadAllText($cachePath) | ConvertFrom-Json
+            $fetchedAt = Convert-ToUtcDateTimeOffset $cached.fetchedAt
+            if ($null -ne $fetchedAt -and $fetchedAt -le $Now -and ($Now - $fetchedAt) -lt $ApiCostEvery -and $cached.dayStart -eq (& $iso $DayStart)) {
+                $result = [ordered]@{ state = 'ok'; todayUsd = [double]$cached.todayUsd; monthUsd = [double]$cached.monthUsd }
+                if ($cached.refreshedAt) { $result['refreshedAt'] = $cached.refreshedAt }
+                return $result
+            }
+        }
+    }
+    catch {}
+
+    try {
+        $ant = Find-Ant
+        if (-not $ant) { return [ordered]@{ state = 'unconfigured' } }
+        $key = Get-AdminKey -DataDir $dataDir
+        $signedIn = [IO.File]::Exists((Join-Path $env:APPDATA 'Anthropic\credentials\default.json'))
+        if (-not $key -and -not $signedIn -and -not $AntPath) { return [ordered]@{ state = 'unconfigured' } }
+
+        $localNow = [TimeZoneInfo]::ConvertTime($Now, [TimeZoneInfo]::Local)
+        $monthStart = Convert-LocalBoundaryToUtc -Value (New-Object datetime($localNow.Year, $localNow.Month, 1)) -TimeZone ([TimeZoneInfo]::Local)
+        $stdinFlag = if ($key) { '--api-key-stdin ' } else { '' }
+        $call = { param($start) Read-CostPage (Invoke-Ant -Ant $ant -StandardInput $key -Arguments ("$stdinFlag--format raw beta:organization:analytics:cost list --starting-at " + (& $iso $start))) }
+        $today = & $call $DayStart
+        $month = & $call $monthStart
+    }
+    catch {
+        # A rejected key or sign-in, and an organization without the Admin API, say so.
+        $state = switch ("$_") { 'ant auth failed.' { 'auth_failed' } 'ant org not available.' { 'org_required' } default { 'error' } }
+        return [ordered]@{ state = $state }
+    }
+    finally { $key = $null }
+
+    $refreshed = @($today.RefreshedAt, $month.RefreshedAt) | Where-Object { $null -ne $_ } | Sort-Object | Select-Object -First 1
+    $result = [ordered]@{ state = 'ok'; todayUsd = $today.Usd; monthUsd = $month.Usd }
+    if ($null -ne $refreshed) { $result['refreshedAt'] = $refreshed.ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
+    try {
+        [void][IO.Directory]::CreateDirectory($dataDir)
+        $cache = [ordered]@{ fetchedAt = $Now.ToString('o', [Globalization.CultureInfo]::InvariantCulture); dayStart = (& $iso $DayStart); todayUsd = $result.todayUsd; monthUsd = $result.monthUsd; refreshedAt = $result['refreshedAt'] }
+        [IO.File]::WriteAllText($cachePath, ($cache | ConvertTo-Json -Compress))
+    }
+    catch {}
+    return $result
+}
+
+# Claude subscription quota, live, from the standalone Claude Code CLI signed in to claude.ai:
+# `/usage` sent the way the Agent SDK sends it returns a structured `usage_report` with the
+# plan's rate-limit windows. It runs as a local command: no model turn, no tokens. Quiet flags:
+# no session saved, no MCP servers, no user settings (so no hooks), in the panel's own folder.
+# Only general windows count (weekly, and a session window when the plan reports one); limits
+# scoped to one model are left out. Without the CLI, the status-line snapshot is used instead.
+function Find-Claude {
+    if ($ClaudePath) { return $ClaudePath }
+    $installed = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+    if ([IO.File]::Exists($installed)) { return $installed }
+    $onPath = Get-Command claude.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Get-ClaudeCliQuota {
+    param(
+        [string]$HomeRoot,
+        [datetimeoffset]$Now,
+        [switch]$Skip
+    )
+
+    if ($Skip -and -not $ClaudePath) { return $null }
+    try {
+        $claude = Find-Claude
+        if (-not $claude) { return $null }
+        $workDir = [IO.Path]::Combine($HomeRoot, '.config', 'herdr-app', 'data', 't3-usage', 'claude-cli')
+        [void][IO.Directory]::CreateDirectory($workDir)
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $claude
+        $startInfo.Arguments = '-p --input-format stream-json --output-format stream-json --verbose --no-session-persistence --strict-mcp-config --setting-sources project'
+        $startInfo.WorkingDirectory = $workDir
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [Diagnostics.Process]::Start($startInfo)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $null = $process.StandardError.ReadToEndAsync()
+            $process.StandardInput.WriteLine('{"type":"user","message":{"role":"user","content":"/usage"}}')
+            $process.StandardInput.Close()
+            if (-not $process.WaitForExit(20000)) {
+                try { $process.Kill() } catch {}
+                return $null
+            }
+            $process.WaitForExit()
+            $text = $stdout.Result
+        }
+        finally { $process.Dispose() }
+
+        $limits = $null
+        foreach ($line in ($text -split "`r?`n")) {
+            if (-not $line.StartsWith('{')) { continue }
+            try { $message = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            $report = Get-JsonProperty $message 'usage_report'
+            $found = Get-JsonProperty (Get-JsonProperty $report 'rate_limits') 'limits'
+            if ($null -ne $found) { $limits = @($found); break }
+        }
+        if ($null -eq $limits) { return $null }
+
+        $windows = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($limit in $limits) {
+            if ($null -ne (Get-JsonProperty $limit 'scope')) { continue }
+            $label = "$(Get-JsonProperty $limit 'group') $(Get-JsonProperty $limit 'kind')"
+            $minutes = if ($label -match 'weekly|seven_day') { 10080 } elseif ($label -match 'session|five_hour') { 300 } else { 0 }
+            if ($minutes -eq 0) { continue }
+            $used = Get-FinitePercent (Get-JsonProperty $limit 'percent')
+            $reset = Convert-ToUtcDateTimeOffset (Get-JsonProperty $limit 'resets_at')
+            # Resets come with sub-second jitter (21:59:59.94 for 22:00); show the minute Claude means.
+            if ($null -ne $reset) { $reset = [datetimeoffset]::FromUnixTimeSeconds([long][Math]::Round($reset.ToUnixTimeMilliseconds() / 60000.0) * 60) }
+            if ($null -eq $used -or $null -eq $reset -or $reset -le $Now) { continue }
+            if (@($windows | Where-Object { $_.windowMinutes -eq $minutes }).Count -gt 0) { continue }
+            $windows.Add((New-QuotaWindow -WindowMinutes $minutes -UsedPercent $used -ResetsAt $reset))
+        }
+        if ($windows.Count -eq 0) { return $null }
+        return [pscustomobject]@{
+            Quota = [ordered]@{
+                state = 'ok'
+                observedAt = $Now.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                windows = @($windows.ToArray() | Sort-Object { $_.windowMinutes })
+            }
+            Model = $null
+        }
+    }
+    catch { return $null }
+}
+
 function Add-QuotaToUsage {
     param(
         [System.Collections.IDictionary]$Usage,
@@ -1243,8 +1518,13 @@ try {
     $openAiRoot = [IO.Path]::Combine($HomePath, '.codex', 'sessions')
     $claudeUsage = Get-ClaudeUsage -Root $claudeRoot -Cutoff $periodStart -Through $effectiveNow
     $openAiUsage = Get-OpenAiUsage -Root $openAiRoot -Cutoff $periodStart -Through $effectiveNow
-    $claudeQuota = Get-ClaudeQuota -HomeRoot $HomePath -Now $effectiveNow
+    $claudeQuota = $null
+    if (-not $SkipLiveQuota -or $ClaudePath) {
+        $claudeQuota = Invoke-Throttled -HomeRoot $HomePath -Name 'claude-cli-quota' -Now $effectiveNow -Fetch { Get-ClaudeCliQuota -HomeRoot $HomePath -Now $effectiveNow }
+    }
+    if ($null -eq $claudeQuota) { $claudeQuota = Get-ClaudeQuota -HomeRoot $HomePath -Now $effectiveNow }
     $openAiQuota = Get-OpenAiQuota -HomeRoot $HomePath -Now $effectiveNow -Skip:$SkipLiveQuota
+    $claudeUsage['apiCost'] = Get-ClaudeApiCost -HomeRoot $HomePath -Now $effectiveNow -DayStart $periodStart -Skip:$SkipLiveQuota
 
     $document = [ordered]@{
         schema = 2
