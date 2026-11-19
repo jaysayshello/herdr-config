@@ -65,10 +65,12 @@ function Add-RawLine {
 }
 
 function Invoke-Collector {
-    param([string]$FakeHome, [string]$FakeAnt)
+    param([string]$FakeHome, [string]$FakeAnt, [string]$FakeClaude)
 
     # Live quota is always skipped: the check never starts a broker or touches the network.
-    $antArgs = if ($FakeAnt) { @{ AntPath = $FakeAnt } } else { @{} }
+    $antArgs = @{}
+    if ($FakeAnt) { $antArgs['AntPath'] = $FakeAnt }
+    if ($FakeClaude) { $antArgs['ClaudePath'] = $FakeClaude }
     $lines = @(& $collector -HomePath $FakeHome -NowUtc $fixedNow -PeriodStartUtc $fixedPeriodStart -SkipLiveQuota @antArgs)
     Assert-Equal $lines.Count 1 'collector must emit exactly one stdout object'
     Assert-True (-not $lines[0].Contains("`r") -and -not $lines[0].Contains("`n")) 'collector JSON must be compact'
@@ -416,6 +418,65 @@ try {
     $noOrg = Invoke-Collector $antHome $fakeAnt
     Assert-Properties $noOrg.claude.apiCost @('state') 'an organization without the Admin API carries no metrics'
     Assert-Equal $noOrg.claude.apiCost.state 'org_required' 'a 404 from the analytics endpoint is org_required'
+
+    # Claude subscription quota through a stand-in for the Claude Code CLI: the usage_report's
+    # general windows (weekly, session) become quota windows; a model-scoped limit and an
+    # already-reset window are left out; it wins over the status-line snapshot.
+    $cliHome = Join-Path $fixtureRoot 'cli-home'
+    $cliDir = Join-Path $fixtureRoot 'fake-claude'
+    [void][IO.Directory]::CreateDirectory($cliDir)
+    [void][IO.Directory]::CreateDirectory((Join-Path $cliHome '.claude\projects'))
+    $fakeClaude = Join-Path $cliDir 'claude.cmd'
+    [IO.File]::WriteAllText($fakeClaude, (@(
+        '@echo off',
+        'echo %*>>"%~dp0argv.log"',
+        'more >>"%~dp0stdin.log"',
+        'type "%~dp0stream.jsonl"'
+    ) -join "`r`n"), [Text.Encoding]::ASCII)
+    $report = [ordered]@{ type = 'result'; usage_report = [ordered]@{ rate_limits = [ordered]@{ limits = @(
+        [ordered]@{ kind = 'weekly_all'; group = 'weekly'; percent = 7; resets_at = '2026-11-15T22:00:00.350266+00:00'; scope = $null; is_active = $true },
+        [ordered]@{ kind = 'weekly_scoped'; group = 'weekly'; percent = 55; resets_at = '2026-11-15T22:00:00+00:00'; scope = [ordered]@{ model = [ordered]@{ display_name = 'Fable' } } },
+        [ordered]@{ kind = 'session'; group = 'session'; percent = 42.5; resets_at = '2026-11-10T14:00:00+00:00'; scope = $null },
+        [ordered]@{ kind = 'session'; group = 'session'; percent = 99; resets_at = '2026-11-10T11:00:00+00:00'; scope = $null }
+    ) } } }
+    [IO.File]::WriteAllText((Join-Path $cliDir 'stream.jsonl'), ('{"type":"system","subtype":"init"}' + "`r`n" + ($report | ConvertTo-Json -Depth 8 -Compress) + "`r`n"), [Text.Encoding]::ASCII)
+    $null = & $capture -HomePath $cliHome -NowUtc $fixedNow.AddMinutes(-5) -InputJson ('{"rate_limits":{"five_hour":{"used_percentage":80,"resets_at":' + (Epoch '2026-11-10T15:00:00Z') + '}}}')
+
+    $cliRun = Invoke-Collector $cliHome '' $fakeClaude
+    $q = $cliRun.claude.quota
+    Assert-Equal $q.state 'ok' 'CLI quota is current'
+    Assert-Equal @($q.windows).Count 2 'session and weekly windows, scoped limit left out'
+    Assert-Equal $q.windows[0].windowMinutes 300 'session window first'
+    Assert-Equal $q.windows[0].usedPercent 42.5 'session used (the already-reset one is skipped, not the snapshot 80%)'
+    Assert-Equal $q.windows[1].windowMinutes 10080 'weekly window'
+    Assert-Equal $q.windows[1].usedPercent 7 'weekly used'
+    $cliArgv = [IO.File]::ReadAllText((Join-Path $cliDir 'argv.log'))
+    Assert-True ($cliArgv.Contains('--no-session-persistence') -and $cliArgv.Contains('--strict-mcp-config') -and $cliArgv.Contains('--input-format stream-json')) 'CLI runs quietly, SDK-style'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $cliDir 'stdin.log')).Contains('"content":"/usage"')) 'CLI receives /usage on stdin'
+
+    # Throttle: a second run within 2 minutes serves the saved value without calling the CLI.
+    $cliState = Join-Path $cliHome '.config\herdr-app\data\t3-usage\claude-cli-quota.json'
+    $cliCalls = @([IO.File]::ReadAllLines((Join-Path $cliDir 'argv.log'))).Count
+    $throttled = Invoke-Collector $cliHome '' $fakeClaude
+    Assert-Equal $throttled.claude.quota.windows[0].usedPercent 42.5 'throttled run serves the saved value'
+    Assert-Equal @([IO.File]::ReadAllLines((Join-Path $cliDir 'argv.log'))).Count $cliCalls 'no CLI call within 2 minutes'
+
+    # When due but failing (rate-limited: no limits in the reply), the last good value stays and
+    # the next try waits twice as long (4 minutes after one failure).
+    [IO.File]::WriteAllText((Join-Path $cliDir 'stream.jsonl'), '{"type":"result"}', [Text.Encoding]::ASCII)
+    $state = [IO.File]::ReadAllText($cliState) | ConvertFrom-Json
+    $state.nextAt = '2026-11-10T11:00:00Z'
+    [IO.File]::WriteAllText($cliState, ($state | ConvertTo-Json -Depth 8 -Compress))
+    $backedOff = Invoke-Collector $cliHome '' $fakeClaude
+    Assert-Equal $backedOff.claude.quota.windows[0].usedPercent 42.5 'a failed read keeps the last good value'
+    $after = [IO.File]::ReadAllText($cliState) | ConvertFrom-Json
+    Assert-Equal ([int]$after.failures) 1 'one failure recorded'
+    Assert-True ($after.nextAt.StartsWith('2026-11-10T12:04:00')) 'next try backs off to 4 minutes'
+
+    # With nothing good saved, a failing CLI falls back to the status-line snapshot.
+    Remove-Item -LiteralPath $cliState
+    $fallback = Invoke-Collector $cliHome '' $fakeClaude
+    Assert-Equal $fallback.claude.quota.windows[0].usedPercent 80 'falls back to the status-line snapshot'
 
     exit 0
 }

@@ -99,7 +99,14 @@ OpenAI quota comes from the authenticated Codex installation already managed by 
 
 When that live read fails, OpenAI falls back to the latest `rate_limits` snapshot Codex already wrote to `%USERPROFILE%\.codex\sessions` in the last seven days, an approach taken from [Alevsk/herdr-agent-usage](https://github.com/Alevsk/herdr-agent-usage) (MIT). That snapshot is a past observation, so it is always shown as stale with its time, and windows that have already reset are dropped. The same project's Claude status-line hook is the model for the capture script below, including its `<model> · <usage>` status text. Its other sources don't apply here: it is a terminal-Herdr plugin, and `claude -p "/usage"` needs a standalone `claude` CLI, which this machine doesn't have.
 
-Claude has no equivalent active fetch in this panel. After a normal Claude Code or Desktop response, the official [status-line API](https://code.claude.com/docs/en/statusline) sends its status payload to `capture-claude-quota.ps1`. The script retains only the safe model identifier/version, observation time, and the `five_hour` and `seven_day` used percentages and reset timestamps, atomically writes `%USERPROFILE%\.config\herdr-app\data\t3-usage\claude-quota.json`, and prints one concise status-line string. Configure Claude's `settings.json` with this exact command:
+**Claude subscription quota, live:** the panel asks the standalone [Claude Code CLI](https://code.claude.com/docs/en/setup) for `/usage`, the way the Agent SDK does (`claude -p --input-format stream-json --output-format stream-json`). It reads the structured `usage_report.rate_limits` from the reply. That's a local command: no model turn, no tokens, about 1–2 s. It runs quietly (`--no-session-persistence --strict-mcp-config --setting-sources project`, from `data\t3-usage\claude-cli`), so no session is saved, no MCP servers start and no hooks run. The card shows the general windows: weekly, and a session window when your plan reports one. Limits scoped to one model, like "Fable", are left out. Setup, once:
+
+1. Install the native CLI: `irm https://claude.ai/install.ps1 | iex` in PowerShell (no admin). It goes to `%USERPROFILE%\.local\bin\claude.exe`, updates itself, and that folder needs to be on your user PATH.
+2. In a new PowerShell window, `claude auth login`, and pick your **Claude.ai account (Pro/Max)**. A token reused from elsewhere doesn't carry the plan, and `/usage` then returns no limits; `claude auth status` should show `"authMethod": "claude.ai"` and your `subscriptionType`.
+
+Without the CLI, or when it reports no limits, the panel falls back to the status-line snapshot below, then says `Subscription quota unavailable`. **The Claude desktop app doesn't run status lines**, so with Desktop alone that snapshot never appears.
+
+**Status-line fallback:** after a Claude Code **terminal** response, the official [status-line API](https://code.claude.com/docs/en/statusline) sends its status payload to `capture-claude-quota.ps1`. The script retains only the safe model identifier/version, observation time, and the `five_hour` and `seven_day` used percentages and reset timestamps, atomically writes `%USERPROFILE%\.config\herdr-app\data\t3-usage\claude-quota.json`, and prints one concise status-line string. Configure Claude's `settings.json` with this exact command:
 
 ```json
 {
@@ -120,7 +127,20 @@ A Claude snapshot is current only for 60 minutes and while its reset is still in
 
 The schema-2 collector output contains only timestamps, local token counts, safe model/plan labels, quota state, and validated window percentages and resets. It never exposes authentication tokens, cookies, account IDs, prompts, tool data, raw transcript records, paths, stderr, or raw broker/protocol responses. Provider collection is isolated so a timeout, malformed source, or unavailable quota for one does not suppress the other.
 
-The panel refreshes every five minutes without overlapping collector runs and keeps only sanitized last-successful data in local storage. Its initial refresh runs from a zero-delay timer after the first render, so `herdr-app check` can render and exit without contacting a live broker. Manual refresh is the heading's refresh icon, or `herdr-app do t3-usage.refresh` (bindable in `keys.json`).
+The panel asks every minute, without overlapping collector runs, and keeps only sanitized last-successful data in local storage. Each source then has its own pace, so the faster tick doesn't hit rate limits:
+
+| Source | How often | Why |
+|---|---|---|
+| Claude subscription (`/usage`), OpenAI quota (Codex app-server) | every **2 min** | Both endpoints are rate-limited. Claude Code itself shares one read per minute and community trackers cache it for about 3 min; Codex's docs suggest 2–5 min. |
+| …after a failed read (rate limit, timeout, signed out) | 4, 8, then every **15 min** | Backs off and serves the last good value meanwhile; that value keeps its old time, so after an hour it shows as stale. State: `data\t3-usage\claude-cli-quota.json`, `openai-quota.json`. |
+| Claude API cost | every **15 min** | The data only refreshes every few hours. |
+| Today's local tokens | every minute | Local files only. |
+
+Its initial refresh runs from a zero-delay timer after the first render, so `herdr-app check` can render and exit without contacting a live broker. Manual refresh is the heading's refresh icon, or `herdr-app do t3-usage.refresh` (bindable in `keys.json`). A manual refresh re-reads what's due but doesn't skip the 2-minute pace of the live quotas.
+
+### Expand and collapse
+
+The chevron in the heading (`›` collapsed, `⌄` expanded) switches between two views. **Collapsed**, the default, shows each provider's main quota line, its bar and the reset time. **Expanded** adds the second window (OpenAI's weekly one), today's local tokens, and the Claude API cost. The block resizes with Herdr's `layout.resize` (246 px or 340 px) so the sidebar reflows. The choice is kept in the mod's local storage and re-applied on start. From a script, or bound to a key in `keys.json`: `herdr-app do t3-usage.expand` toggles it.
 
 ### Claude API cost
 

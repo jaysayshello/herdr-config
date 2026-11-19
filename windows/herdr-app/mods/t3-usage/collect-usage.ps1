@@ -4,7 +4,9 @@ param(
     [datetime]$PeriodStartUtc,
     [switch]$SkipLiveQuota,
     # Tests only: a stand-in for ant.exe. Without it, -SkipLiveQuota also skips API cost.
-    [string]$AntPath
+    [string]$AntPath,
+    # Tests only: a stand-in for claude.exe. Without it, -SkipLiveQuota also skips the CLI.
+    [string]$ClaudePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1134,6 +1136,45 @@ function Get-CodexRolloutQuota {
     }
 }
 
+# Live quota reads (Claude's /usage, Codex's account/rateLimits/read) reach rate-limited
+# endpoints, so each runs at most every 2 minutes however often the panel polls. A failed read
+# (rate limit, timeout, signed out) doubles the wait, up to 15 minutes, and the last good value
+# is served meanwhile; its observedAt stays the old time, so the panel marks it stale after an
+# hour. State per source: data\t3-usage\<name>.json (next due time, failures, last good value).
+$LiveEvery = [timespan]::FromMinutes(2)
+$LiveBackoffMax = [timespan]::FromMinutes(15)
+
+function Invoke-Throttled {
+    param(
+        [string]$HomeRoot,
+        [string]$Name,
+        [datetimeoffset]$Now,
+        [scriptblock]$Fetch
+    )
+
+    $dir = [IO.Path]::Combine($HomeRoot, '.config', 'herdr-app', 'data', 't3-usage')
+    $path = Join-Path $dir "$Name.json"
+    $saved = $null
+    try { if ([IO.File]::Exists($path)) { $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json } } catch { $saved = $null }
+    $nextAt = if ($saved) { Convert-ToUtcDateTimeOffset $saved.nextAt } else { $null }
+    $lastGood = if ($saved) { $saved.value } else { $null }
+    if ($null -ne $nextAt -and $Now -lt $nextAt -and ($nextAt - $Now) -le $LiveBackoffMax) { return $lastGood }
+
+    $result = $null
+    try { $result = & $Fetch } catch { $result = $null }
+    $ok = $null -ne $result -and $result.Quota.state -eq 'ok'
+    $failures = if ($ok) { 0 } elseif ($saved) { [int]$saved.failures + 1 } else { 1 }
+    $wait = if ($ok) { $LiveEvery } else { [timespan]::FromTicks([Math]::Min($LiveEvery.Ticks * [Math]::Pow(2, $failures), $LiveBackoffMax.Ticks)) }
+    $value = if ($ok) { $result } else { $lastGood }
+    try {
+        [void][IO.Directory]::CreateDirectory($dir)
+        $state = [ordered]@{ nextAt = $Now.Add($wait).ToString('o', [Globalization.CultureInfo]::InvariantCulture); failures = $failures; value = $value }
+        [IO.File]::WriteAllText($path, ($state | ConvertTo-Json -Depth 8 -Compress))
+    }
+    catch {}
+    return $value
+}
+
 function Get-OpenAiQuota {
     param(
         [string]$HomeRoot,
@@ -1141,15 +1182,17 @@ function Get-OpenAiQuota {
         [switch]$Skip
     )
 
-    $live = Get-OpenAiLiveQuota -HomeRoot $HomeRoot -Now $Now -Skip:$Skip
-    if ($live.Quota.state -eq 'ok') {
+    $live = if ($Skip) { Get-OpenAiLiveQuota -HomeRoot $HomeRoot -Now $Now -Skip }
+        else { Invoke-Throttled -HomeRoot $HomeRoot -Name 'openai-quota' -Now $Now -Fetch { Get-OpenAiLiveQuota -HomeRoot $HomeRoot -Now $Now } }
+    if ($null -ne $live -and $live.Quota.state -eq 'ok') {
         return $live
     }
     $fallback = Get-CodexRolloutQuota -HomeRoot $HomeRoot -Now $Now
     if ($null -ne $fallback) {
         return $fallback
     }
-    return $live
+    if ($null -ne $live) { return $live }
+    return [pscustomobject]@{ Quota = New-EmptyQuota -State error; Model = $null }
 }
 
 function Get-OpenAiLiveQuota {
@@ -1350,6 +1393,95 @@ function Get-ClaudeApiCost {
     return $result
 }
 
+# Claude subscription quota, live, from the standalone Claude Code CLI signed in to claude.ai:
+# `/usage` sent the way the Agent SDK sends it returns a structured `usage_report` with the
+# plan's rate-limit windows. It runs as a local command: no model turn, no tokens. Quiet flags:
+# no session saved, no MCP servers, no user settings (so no hooks), in the panel's own folder.
+# Only general windows count (weekly, and a session window when the plan reports one); limits
+# scoped to one model are left out. Without the CLI, the status-line snapshot is used instead.
+function Find-Claude {
+    if ($ClaudePath) { return $ClaudePath }
+    $installed = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+    if ([IO.File]::Exists($installed)) { return $installed }
+    $onPath = Get-Command claude.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Get-ClaudeCliQuota {
+    param(
+        [string]$HomeRoot,
+        [datetimeoffset]$Now,
+        [switch]$Skip
+    )
+
+    if ($Skip -and -not $ClaudePath) { return $null }
+    try {
+        $claude = Find-Claude
+        if (-not $claude) { return $null }
+        $workDir = [IO.Path]::Combine($HomeRoot, '.config', 'herdr-app', 'data', 't3-usage', 'claude-cli')
+        [void][IO.Directory]::CreateDirectory($workDir)
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $claude
+        $startInfo.Arguments = '-p --input-format stream-json --output-format stream-json --verbose --no-session-persistence --strict-mcp-config --setting-sources project'
+        $startInfo.WorkingDirectory = $workDir
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [Diagnostics.Process]::Start($startInfo)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $null = $process.StandardError.ReadToEndAsync()
+            $process.StandardInput.WriteLine('{"type":"user","message":{"role":"user","content":"/usage"}}')
+            $process.StandardInput.Close()
+            if (-not $process.WaitForExit(20000)) {
+                try { $process.Kill() } catch {}
+                return $null
+            }
+            $process.WaitForExit()
+            $text = $stdout.Result
+        }
+        finally { $process.Dispose() }
+
+        $limits = $null
+        foreach ($line in ($text -split "`r?`n")) {
+            if (-not $line.StartsWith('{')) { continue }
+            try { $message = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            $report = Get-JsonProperty $message 'usage_report'
+            $found = Get-JsonProperty (Get-JsonProperty $report 'rate_limits') 'limits'
+            if ($null -ne $found) { $limits = @($found); break }
+        }
+        if ($null -eq $limits) { return $null }
+
+        $windows = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($limit in $limits) {
+            if ($null -ne (Get-JsonProperty $limit 'scope')) { continue }
+            $label = "$(Get-JsonProperty $limit 'group') $(Get-JsonProperty $limit 'kind')"
+            $minutes = if ($label -match 'weekly|seven_day') { 10080 } elseif ($label -match 'session|five_hour') { 300 } else { 0 }
+            if ($minutes -eq 0) { continue }
+            $used = Get-FinitePercent (Get-JsonProperty $limit 'percent')
+            $reset = Convert-ToUtcDateTimeOffset (Get-JsonProperty $limit 'resets_at')
+            # Resets come with sub-second jitter (21:59:59.94 for 22:00); show the minute Claude means.
+            if ($null -ne $reset) { $reset = [datetimeoffset]::FromUnixTimeSeconds([long][Math]::Round($reset.ToUnixTimeMilliseconds() / 60000.0) * 60) }
+            if ($null -eq $used -or $null -eq $reset -or $reset -le $Now) { continue }
+            if (@($windows | Where-Object { $_.windowMinutes -eq $minutes }).Count -gt 0) { continue }
+            $windows.Add((New-QuotaWindow -WindowMinutes $minutes -UsedPercent $used -ResetsAt $reset))
+        }
+        if ($windows.Count -eq 0) { return $null }
+        return [pscustomobject]@{
+            Quota = [ordered]@{
+                state = 'ok'
+                observedAt = $Now.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                windows = @($windows.ToArray() | Sort-Object { $_.windowMinutes })
+            }
+            Model = $null
+        }
+    }
+    catch { return $null }
+}
+
 function Add-QuotaToUsage {
     param(
         [System.Collections.IDictionary]$Usage,
@@ -1386,7 +1518,11 @@ try {
     $openAiRoot = [IO.Path]::Combine($HomePath, '.codex', 'sessions')
     $claudeUsage = Get-ClaudeUsage -Root $claudeRoot -Cutoff $periodStart -Through $effectiveNow
     $openAiUsage = Get-OpenAiUsage -Root $openAiRoot -Cutoff $periodStart -Through $effectiveNow
-    $claudeQuota = Get-ClaudeQuota -HomeRoot $HomePath -Now $effectiveNow
+    $claudeQuota = $null
+    if (-not $SkipLiveQuota -or $ClaudePath) {
+        $claudeQuota = Invoke-Throttled -HomeRoot $HomePath -Name 'claude-cli-quota' -Now $effectiveNow -Fetch { Get-ClaudeCliQuota -HomeRoot $HomePath -Now $effectiveNow }
+    }
+    if ($null -eq $claudeQuota) { $claudeQuota = Get-ClaudeQuota -HomeRoot $HomePath -Now $effectiveNow }
     $openAiQuota = Get-OpenAiQuota -HomeRoot $HomePath -Now $effectiveNow -Skip:$SkipLiveQuota
     $claudeUsage['apiCost'] = Get-ClaudeApiCost -HomeRoot $HomePath -Now $effectiveNow -DayStart $periodStart -Skip:$SkipLiveQuota
 
