@@ -77,6 +77,15 @@ if [ -n "$RESTORE" ]; then
     grep -qxF "$SOURCE" "$HOME/.bashrc" 2>/dev/null ||
       printf '\n# Herdr: per-terminal omp session resume (herdr-config windows/wsl/omp-resume.bash)\n%s\n' "$SOURCE" >> "$HOME/.bashrc"
     systemctl --user daemon-reload && systemctl --user enable --now omp-update.timer
+    # Windows login: start WSL and keep it running (scripts/start-wsl.ps1, the script the Spaces
+    # mod also runs whenever Herdr finds WSL down). Replaces the old raw `wsl --exec sleep` shortcut.
+    /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -NonInteractive -Command '
+      $l = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Herdr WSL keepalive.lnk")
+      $l.TargetPath = "$env:SystemRoot\System32\conhost.exe"
+      $l.Arguments = "--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$env:USERPROFILE\.config\herdr-app\scripts\start-wsl.ps1`""
+      $l.WorkingDirectory = $env:USERPROFILE
+      $l.WindowStyle = 7
+      $l.Save()'
     echo "Restored. Herdr reloads keys, layouts and mods by itself."
   else
     # herdr-focus:// links (the orchestrator's More rows) open with the Herdr Focus applet.

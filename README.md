@@ -11,7 +11,7 @@ Project notes, the keyboard-first rules and the bindings table: `~/Projects/rici
 ./sync.sh --restore  # repo -> live files
 ```
 
-On the Mac it syncs `herdr/`, `herdr-app/` and the LaunchAgent. Run from WSL, it syncs `windows/` instead. For this panel, `./sync.sh` copies the live `%USERPROFILE%\.config\herdr-app\mods\t3-usage\` directory into the backup at `windows/herdr-app/mods/t3-usage/`; `./sync.sh --restore` copies that backup to the same live Windows path. Restore also links `herdr-app` into `~/.local/bin`, makes `~/.bashrc` source `omp-resume.bash`, and turns on the update timer. Both platforms sync the other common mods, `omp/extensions/` and `orchestrator/`; Mac sync never references the Windows-only panel.
+On the Mac it syncs `herdr/`, `herdr-app/` and the LaunchAgent. Run from WSL, it syncs `windows/` instead. For this panel, `./sync.sh` copies the live `%USERPROFILE%\.config\herdr-app\mods\t3-usage\` directory into the backup at `windows/herdr-app/mods/t3-usage/`; `./sync.sh --restore` copies that backup to the same live Windows path. Restore also links `herdr-app` into `~/.local/bin`, makes `~/.bashrc` source `omp-resume.bash`, turns on the update timer, and points the Startup shortcut `Herdr WSL keepalive` at `scripts/start-wsl.ps1` (see [WSL starts with Herdr](#wsl-starts-with-herdr)). Both platforms sync the other common mods, `omp/extensions/` and `orchestrator/`; Mac sync never references the Windows-only panel.
 
 The script copies files. It doesn't symlink them, because Herdr writes its files atomically and that turns a symlink back into a plain file.
 
@@ -44,6 +44,19 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `orchestrator/.omp/extensions/herdr-switch.ts`, `orchestrator/.omp/lib/handoff.ts` | `/claude` and `/omp` (see below) and the handoff file builder they use. omp does not load `lib/` as an extension |
 | `claude/hooks/herdr-claude.sh` | Claude Code hook: reports Claude's state to Herdr and keeps a resume breadcrumb for each terminal. Restores to `~/.claude/hooks/`; `settings.json` is never synced |
 | `tests/` | `tests/run.sh` runs `bun test tests/` in a sandbox (own HOME, test core `herdrtest`, test window), with fake `omp` and `claude` programs (`tests/fakes/fake-agent.ts`) |
+
+## WSL starts with Herdr
+
+On Windows, Herdr reaches its `wsl` machine over ssh (`Host wsl` in `%USERPROFILE%\.ssh\config`: `127.0.0.1:2222`, sshd under systemd in Ubuntu). ssh can't start WSL, and WSL stops a distro once no `wsl.exe` session is left. Before this change, the only thing starting it was a login shortcut, so after `wsl --shutdown` or a WSL crash Herdr just showed `WSL disconnected` until WSL was started by hand.
+
+`windows/herdr-app/scripts/start-wsl.ps1` starts Ubuntu if it isn't running and keeps it running, with a hidden `wsl.exe -d Ubuntu --exec sleep infinity` started through WMI so it outlives whoever ran the script. It then waits for sshd on 2222. It does nothing when that keepalive already exists, and a mutex stops parallel runs from racing. Two things run it:
+
+- **Herdr itself:** the Windows Spaces mod (`t3-spaces`) checks `hc machine ls` every 15 s. Whenever the `wsl` machine isn't connected, it runs the script, at most once a minute. That covers every way Herdr opens (Start menu, taskbar, an update restart) and WSL stopping while Herdr is open. herdr-core reconnects by itself within seconds of sshd answering. There's no wrapper launcher, and no extra Herdr window is ever started.
+- **Login:** the Startup shortcut `Herdr WSL keepalive` runs the same script, so WSL is ready before Herdr opens.
+
+While Herdr is open, `wsl --shutdown` is followed by WSL starting again within about a minute. To keep WSL stopped, close Herdr first.
+
+To test it, save your work in WSL first: `wsl --shutdown` ends every WSL terminal and agent. With Herdr open, run `wsl --shutdown` from PowerShell. Within about a minute, `wsl -l --running` lists Ubuntu again and the Spaces list shows the WSL spaces instead of `WSL disconnected`.
 
 ## /claude and /omp
 

@@ -7,7 +7,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, agents, machines, panes, layout, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window } from "herdr";
+import { spaces, agents, machines, panes, layout, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, appHome } from "herdr";
 import { wizard, pickWizard } from "./wizards.js";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -62,6 +62,10 @@ const halo = (row) => div().relative().flex_none().my(GAP)
   .child(row);
 // Windows: the machine whose spaces lead the Spaces list, and where the heading's + makes one.
 const WSL = "wsl";
+// Herdr reaches WSL over ssh, which can't start WSL. While the wsl machine isn't connected
+// (Herdr just opened, or WSL stopped), scripts/start-wsl.ps1 starts it and keeps it running;
+// herdr-core reconnects by itself. At most once a minute; the script does nothing if WSL is up.
+const WSL_START_EVERY = 60000;
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -148,7 +152,24 @@ export default class Spaces extends View {
   refreshMachines(cx) {
     cx.spawn(async cx => {
       try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      const wsl = this.machines.find((m) => m.name === WSL);
+      if (wsl && wsl.state !== "connected") this.startWsl(cx);
       cx.notify();
+    });
+  }
+
+  startWsl(cx) {
+    const now = Date.now();
+    if (this.wslStarting || now - (this.wslStartedAt ?? 0) < WSL_START_EVERY) return;
+    this.wslStarting = true;
+    this.wslStartedAt = now;
+    cx.spawn(async cx => {
+      try {
+        await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+          "-File", `${appHome()}\\scripts\\start-wsl.ps1`], { timeout: 60000 });
+      } catch {}
+      this.wslStarting = false;
+      this.refreshMachines(cx);
     });
   }
 
