@@ -1260,8 +1260,13 @@ function Invoke-Ant {
         }
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) {
-            # stderr only decides which kind of failure this was; its text goes nowhere.
-            if ($stderr.Result -match '\b(401|403)\b|authentication_error|permission_error|not configured|ant auth login') { throw 'ant auth failed.' }
+            # ant's output only decides which kind of failure this was; its text goes nowhere.
+            # The error JSON lands on stdout and the status line on stderr, so both are read.
+            $said = $stdout.Result + "`n" + $stderr.Result
+            # Signed in, but the organization can't use the Admin API (an individual Console
+            # account answers "Missing permissions" and 404 on the analytics endpoints).
+            if ($said -match 'permission_error|not_found_error|\b404 Not Found\b') { throw 'ant org not available.' }
+            if ($said -match '\b401\b|authentication_error|not configured|ant auth login') { throw 'ant auth failed.' }
             throw 'ant failed.'
         }
         return $stdout.Result
@@ -1327,8 +1332,9 @@ function Get-ClaudeApiCost {
         $month = & $call $monthStart
     }
     catch {
-        # A rejected key or sign-in, or a missing org:admin scope, says so; other failures don't.
-        return [ordered]@{ state = if ("$_" -eq 'ant auth failed.') { 'auth_failed' } else { 'error' } }
+        # A rejected key or sign-in, and an organization without the Admin API, say so.
+        $state = switch ("$_") { 'ant auth failed.' { 'auth_failed' } 'ant org not available.' { 'org_required' } default { 'error' } }
+        return [ordered]@{ state = $state }
     }
     finally { $key = $null }
 

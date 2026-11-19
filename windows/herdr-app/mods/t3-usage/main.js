@@ -106,7 +106,7 @@ function sanitizeProvider(value, tokenFields, includeTier = false) {
 }
 
 // The Claude card's "API cost" line (Usage and Cost Analytics API through `ant`, see collect-usage.ps1).
-const API_COST_STATES = new Set(["ok", "unconfigured", "unavailable", "auth_failed", "error"]);
+const API_COST_STATES = new Set(["ok", "unconfigured", "unavailable", "auth_failed", "org_required", "error"]);
 
 function sanitizeApiCost(value) {
   if (!value || typeof value !== "object" || !API_COST_STATES.has(value.state)) return null;
@@ -158,6 +158,7 @@ function apiCostText(apiCost) {
   if (!apiCost || apiCost.state === "unavailable") return null;
   if (apiCost.state === "unconfigured") return "API cost: not set up (README: Claude API cost)";
   if (apiCost.state === "auth_failed") return "API cost: sign-in or Admin key rejected";
+  if (apiCost.state === "org_required") return "API cost: needs a Console organization (README)";
   if (apiCost.state === "error") return "API cost unavailable";
   if (!apiCost.refreshedAt) return "API cost: no data yet";
   return `API cost today ${formatUsd(apiCost.todayUsd)} · month ${formatUsd(apiCost.monthUsd)} · through ${formatReset(apiCost.refreshedAt)}`;

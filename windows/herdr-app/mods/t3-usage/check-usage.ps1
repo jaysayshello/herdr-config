@@ -374,6 +374,7 @@ try {
         'echo %*>>"%~dp0argv.log"',
         'more >>"%~dp0stdin.log"',
         'if exist "%~dp0reject" (echo API error 401 authentication_error 1>&2 & exit /b 1)',
+        'if exist "%~dp0noorg" (echo {"type":"error","error":{"type":"not_found_error","message":"Not found"}} & echo GET analytics/cost: 404 Not Found 1>&2 & exit /b 1)',
         'echo %* | find "2026-11-09T12:30:00Z" >nul && (type "%~dp0today.json") || (type "%~dp0month.json")'
     ) -join "`r`n"), [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText((Join-Path $antDir 'today.json'), '{"data":[{"cost":{"currency":"USD","amount":"12345.000000"}},{"cost":{"currency":"USD","amount":"55.500000"}}],"has_more":false,"data_refreshed_at":"2026-11-10T09:00:00Z"}', [Text.Encoding]::ASCII)
@@ -407,6 +408,14 @@ try {
     $rejected = Invoke-Collector $antHome $fakeAnt
     Assert-Properties $rejected.claude.apiCost @('state') 'a rejected key carries no metrics'
     Assert-Equal $rejected.claude.apiCost.state 'auth_failed' 'a 401 from ant is auth_failed'
+
+    # Signed in, but an organization without the Admin API (as an individual Console account
+    # answers): org_required, not auth_failed.
+    Remove-Item -LiteralPath (Join-Path $antDir 'reject')
+    [IO.File]::WriteAllText((Join-Path $antDir 'noorg'), '')
+    $noOrg = Invoke-Collector $antHome $fakeAnt
+    Assert-Properties $noOrg.claude.apiCost @('state') 'an organization without the Admin API carries no metrics'
+    Assert-Equal $noOrg.claude.apiCost.state 'org_required' 'a 404 from the analytics endpoint is org_required'
 
     exit 0
 }

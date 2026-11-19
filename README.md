@@ -133,7 +133,9 @@ It goes through [`ant`](https://github.com/anthropics/anthropic-cli), Anthropic'
 - **Browser sign-in (recommended, no long-lived key):** `& "$env:LOCALAPPDATA\Programs\ant\ant.exe" auth login --admin` in PowerShell, as an organization admin. `ant` stores and refreshes the token itself.
 - **Admin API key:** create one at [platform.claude.com/settings/admin-keys](https://platform.claude.com/settings/admin-keys), ideally with an expiry, then run `powershell -NoProfile -File "$env:USERPROFILE\.config\herdr-app\mods\t3-usage\set-claude-admin-key.ps1"` and paste it into the hidden prompt. It's saved with Windows DPAPI (this Windows user only) as `data\t3-usage\claude-admin-key.dpapi`, which is never synced, and handed to `ant` on stdin, never on its command line. `-Remove` deletes it. A stored key wins over the browser sign-in.
 
-The line says `not set up` until one of those exists, `sign-in or Admin key rejected` on a 401/403 (or a sign-in without `org:admin`), `no data yet` before the API has any for the range, and `unavailable` on other errors. The key, tokens and `ant`'s messages never reach the panel or its output.
+The line says `not set up` until one of those exists, `sign-in or Admin key rejected` on a 401, `needs a Console organization` when the sign-in works but the organization can't use the Admin API, `no data yet` before the API has any for the range, and `unavailable` on other errors. The key, tokens and `ant`'s messages never reach the panel or its output.
+
+**Individual Console accounts** (named like "Jay's Individual Org") get the "needs a Console organization" state: the basic Admin endpoints answer `permission_error` ("Missing permissions"), and the analytics endpoints answer 404, even with `org:admin`. Set up an organization on [platform.claude.com/settings/organization](https://platform.claude.com/settings/organization), sign in again (`ant auth login --admin`), and refresh.
 
 ### Hide and show
 
