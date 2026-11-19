@@ -4,7 +4,8 @@ import { appHome, exec, layout, nextCommand, run, theme } from "herdr";
 
 const EVERY = 5 * 60 * 1000;
 const STALE_AFTER = 60 * 60 * 1000;
-const EXEC_TIMEOUT = 20 * 1000;
+// The collector may ask Codex (about 12 s at most) and, every 15 minutes, `ant` twice.
+const EXEC_TIMEOUT = 60 * 1000;
 const CACHE_KEY = "t3-usage:schema-2";
 const LOCAL_STATES = new Set(["ok", "empty", "unavailable", "error"]);
 const QUOTA_STATES = new Set(["ok", "stale", "unavailable", "error"]);
@@ -104,6 +105,22 @@ function sanitizeProvider(value, tokenFields, includeTier = false) {
   return provider;
 }
 
+// The Claude card's "API cost" line (Usage and Cost Analytics API through `ant`, see collect-usage.ps1).
+const API_COST_STATES = new Set(["ok", "unconfigured", "unavailable", "auth_failed", "error"]);
+
+function sanitizeApiCost(value) {
+  if (!value || typeof value !== "object" || !API_COST_STATES.has(value.state)) return null;
+  if (value.state !== "ok") return { state: value.state };
+  const usd = (n) => (typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null);
+  const todayUsd = usd(value.todayUsd);
+  const monthUsd = usd(value.monthUsd);
+  if (todayUsd == null || monthUsd == null) return { state: "error" };
+  const apiCost = { state: "ok", todayUsd, monthUsd };
+  const refreshedAt = safeDate(value.refreshedAt);
+  if (refreshedAt) apiCost.refreshedAt = refreshedAt;
+  return apiCost;
+}
+
 function sanitizeUsage(value) {
   const generatedAt = safeDate(value?.generatedAt);
   const periodStart = safeDate(value?.periodStart);
@@ -117,7 +134,7 @@ function sanitizeUsage(value) {
     generatedAt,
     periodStart,
     periodEnd,
-    claude: sanitizeProvider(value.claude, CLAUDE_TOKENS),
+    claude: { ...sanitizeProvider(value.claude, CLAUDE_TOKENS), apiCost: sanitizeApiCost(value.claude?.apiCost) },
     openai: sanitizeProvider(value.openai, OPENAI_TOKENS, true),
   };
 }
@@ -129,6 +146,21 @@ function cachedUsage() {
   } catch (_error) {
     return null;
   }
+}
+
+// No Intl in Herdr's runtime: dollars and cents by hand, thousands grouped above $1,000.
+function formatUsd(value) {
+  if (value < 1000) return `$${value.toFixed(2)}`;
+  return `$${String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
+}
+
+function apiCostText(apiCost) {
+  if (!apiCost || apiCost.state === "unavailable") return null;
+  if (apiCost.state === "unconfigured") return "API cost: not set up (README: Claude API cost)";
+  if (apiCost.state === "auth_failed") return "API cost: sign-in or Admin key rejected";
+  if (apiCost.state === "error") return "API cost unavailable";
+  if (!apiCost.refreshedAt) return "API cost: no data yet";
+  return `API cost today ${formatUsd(apiCost.todayUsd)} · month ${formatUsd(apiCost.monthUsd)} · through ${formatReset(apiCost.refreshedAt)}`;
 }
 
 function compactTokens(value) {
@@ -321,6 +353,9 @@ export default class UsagePanel extends View {
     const quotaColor = quotaState === "error" ? t.ansi1
       : quotaState === "ok" ? t.foreground : t.muted;
     const localColor = localState === "error" ? t.ansi1 : t.dim;
+    const costText = id === "claude" ? apiCostText(provider?.apiCost) : null;
+    const costColor = provider?.apiCost?.state === "ok" ? t.muted
+      : provider?.apiCost?.state === "auth_failed" ? t.ansi1 : t.dim;
     return v_flex()
       .id(`usage-${id}`)
       .flex_1().min_h(0)
@@ -346,7 +381,10 @@ export default class UsagePanel extends View {
         div().min_w(0).truncate().text_size(10).text_color(t.dim)
           .child(`${windowLabel(secondWindow.windowMinutes)} ${secondWindow.usedPercent}% used · ${secondWindow.remainingPercent}% left · resets ${formatReset(secondWindow.resetsAt)}`),
       ))
-      .child(div().min_w(0).truncate().text_size(10).text_color(localColor).child(localText));
+      .child(div().min_w(0).truncate().text_size(10).text_color(localColor).child(localText))
+      .when(Boolean(costText), (el) => el.child(
+        div().min_w(0).truncate().text_size(10).text_color(costColor).child(costText),
+      ));
   }
 
   render(cx) {

@@ -65,10 +65,11 @@ function Add-RawLine {
 }
 
 function Invoke-Collector {
-    param([string]$FakeHome)
+    param([string]$FakeHome, [string]$FakeAnt)
 
     # Live quota is always skipped: the check never starts a broker or touches the network.
-    $lines = @(& $collector -HomePath $FakeHome -NowUtc $fixedNow -PeriodStartUtc $fixedPeriodStart -SkipLiveQuota)
+    $antArgs = if ($FakeAnt) { @{ AntPath = $FakeAnt } } else { @{} }
+    $lines = @(& $collector -HomePath $FakeHome -NowUtc $fixedNow -PeriodStartUtc $fixedPeriodStart -SkipLiveQuota @antArgs)
     Assert-Equal $lines.Count 1 'collector must emit exactly one stdout object'
     Assert-True (-not $lines[0].Contains("`r") -and -not $lines[0].Contains("`n")) 'collector JSON must be compact'
     try {
@@ -277,7 +278,8 @@ try {
     $full = Invoke-Collector $fullHome
     Assert-Envelope $full
     # Only today's records count: yesterday's (before the fixed period start) are excluded.
-    Assert-Properties $full.claude @('state', 'totalTokens', 'inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'model', 'sourceUpdatedAt', 'quota') 'unexpected Claude success schema'
+    Assert-Properties $full.claude @('state', 'totalTokens', 'inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'model', 'sourceUpdatedAt', 'quota', 'apiCost') 'unexpected Claude success schema'
+    Assert-Equal $full.claude.apiCost.state 'unavailable' 'API cost is skipped without ant in the check'
     Assert-Equal $full.claude.state 'ok' 'Claude state'
     Assert-Equal $full.claude.inputTokens 5 'Claude input aggregation'
     Assert-Equal $full.claude.cacheCreationTokens 0 'Claude cache creation aggregation'
@@ -322,7 +324,7 @@ try {
     $null = & $capture -HomePath $emptyHome -NowUtc $fixedNow.AddHours(-2) -InputJson $staleInput
     $empty = Invoke-Collector $emptyHome
     Assert-Envelope $empty
-    Assert-Properties $empty.claude @('state', 'quota') 'empty Claude must not carry metrics'
+    Assert-Properties $empty.claude @('state', 'quota', 'apiCost') 'empty Claude must not carry metrics'
     Assert-Properties $empty.openai @('state', 'quota') 'unavailable OpenAI must not carry metrics'
     Assert-Equal $empty.claude.state 'empty' 'malformed readable Claude source should be empty'
     Assert-Equal $empty.openai.state 'unavailable' 'missing OpenAI source should be unavailable'
@@ -357,6 +359,54 @@ try {
     Assert-Properties $isolated.openai @('state', 'quota') 'errored OpenAI must not carry metrics'
     Assert-Equal $isolated.openai.state 'error' 'one unreadable OpenAI source must error despite another readable source'
     Assert-Equal $isolated.claude.quota.state 'unavailable' 'no Claude snapshot is unavailable, not 0%'
+
+    # Claude API cost through a stand-in for ant: today and month pages (cents -> dollars), the
+    # Admin key only on stdin (never in argv or the output), the 15-minute cache, and a rejected
+    # key reported as auth_failed.
+    $antHome = Join-Path $fixtureRoot 'ant-home'
+    $antDir = Join-Path $fixtureRoot 'fake-ant'
+    $antData = Join-Path $antHome '.config\herdr-app\data\t3-usage'
+    [void][IO.Directory]::CreateDirectory($antDir)
+    [void][IO.Directory]::CreateDirectory($antData)
+    $fakeAnt = Join-Path $antDir 'ant.cmd'
+    [IO.File]::WriteAllText($fakeAnt, (@(
+        '@echo off',
+        'echo %*>>"%~dp0argv.log"',
+        'more >>"%~dp0stdin.log"',
+        'if exist "%~dp0reject" (echo API error 401 authentication_error 1>&2 & exit /b 1)',
+        'echo %* | find "2026-11-09T12:30:00Z" >nul && (type "%~dp0today.json") || (type "%~dp0month.json")'
+    ) -join "`r`n"), [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $antDir 'today.json'), '{"data":[{"cost":{"currency":"USD","amount":"12345.000000"}},{"cost":{"currency":"USD","amount":"55.500000"}}],"has_more":false,"data_refreshed_at":"2026-11-10T09:00:00Z"}', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $antDir 'month.json'), '{"data":[{"cost":{"currency":"USD","amount":"4567800.000000"}}],"has_more":false,"data_refreshed_at":"2026-11-10T08:00:00Z"}', [Text.Encoding]::ASCII)
+    $secret = 'sk-ant-admin01-CHECK_SECRET_SENTINEL'
+    $secure = ConvertTo-SecureString $secret -AsPlainText -Force
+    Set-Content -LiteralPath (Join-Path $antData 'claude-admin-key.dpapi') -Value ($secure | ConvertFrom-SecureString) -NoNewline
+
+    $antRun = Invoke-Collector $antHome $fakeAnt
+    $cost = $antRun.claude.apiCost
+    Assert-Properties $cost @('state', 'todayUsd', 'monthUsd', 'refreshedAt') 'unexpected API cost schema'
+    Assert-Equal $cost.state 'ok' 'API cost state'
+    Assert-Equal $cost.todayUsd 124.01 'today: cents summed across rows, then dollars'
+    Assert-Equal $cost.monthUsd 45678 'month in dollars'
+    Assert-True ($cost.refreshedAt.StartsWith('2026-11-10T08:00:00')) 'through = the older of the two refresh times'
+    $argv = [IO.File]::ReadAllText((Join-Path $antDir 'argv.log'))
+    Assert-True ($argv.Contains('--api-key-stdin') -and $argv.Contains('beta:organization:analytics:cost list') -and $argv.Contains('--format raw')) 'ant gets the cost list call with the key on stdin'
+    Assert-True (-not $argv.Contains('CHECK_SECRET_SENTINEL')) 'the key never appears in ant arguments'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $antDir 'stdin.log')).Contains($secret)) 'the key reaches ant on stdin'
+    Assert-True (-not (($antRun | ConvertTo-Json -Depth 10 -Compress).Contains('CHECK_SECRET_SENTINEL'))) 'the key never appears in collector output'
+
+    # Within 15 minutes the cache answers, so ant isn't called again.
+    $callsBefore = @([IO.File]::ReadAllLines((Join-Path $antDir 'argv.log'))).Count
+    $cachedRun = Invoke-Collector $antHome $fakeAnt
+    Assert-Equal $cachedRun.claude.apiCost.todayUsd 124.01 'cached today'
+    Assert-Equal @([IO.File]::ReadAllLines((Join-Path $antDir 'argv.log'))).Count $callsBefore 'cache avoids a second ant call'
+
+    # A rejected key: auth_failed, and no metrics.
+    Remove-Item -LiteralPath (Join-Path $antData 'claude-api-cost.json')
+    [IO.File]::WriteAllText((Join-Path $antDir 'reject'), '')
+    $rejected = Invoke-Collector $antHome $fakeAnt
+    Assert-Properties $rejected.claude.apiCost @('state') 'a rejected key carries no metrics'
+    Assert-Equal $rejected.claude.apiCost.state 'auth_failed' 'a 401 from ant is auth_failed'
 
     exit 0
 }

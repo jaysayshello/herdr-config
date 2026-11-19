@@ -122,6 +122,19 @@ The schema-2 collector output contains only timestamps, local token counts, safe
 
 The panel refreshes every five minutes without overlapping collector runs and keeps only sanitized last-successful data in local storage. Its initial refresh runs from a zero-delay timer after the first render, so `herdr-app check` can render and exit without contacting a live broker. Manual refresh is the heading's refresh icon, or `herdr-app do t3-usage.refresh` (bindable in `keys.json`).
 
+### Claude API cost
+
+The Claude card can add one line from Anthropic's [Usage and Cost Analytics API](https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api): `API cost today $X · month $Y · through 3:00 PM`. That's what your **Claude Console (API) organization** spent: API calls, the Console, and Claude Code signed in with a Console account. It is **not** a Pro/Max subscription, whose limits stay on the quota bar above it. The API is in beta, needs an Admin API credential, and isn't available to claude.ai Team plans or individual Console accounts without an organization.
+
+The data lags: usually under 4 hours, at most 24. The "through" time is the API's `data_refreshed_at`; anything after it is missing or partial. So the collector asks at most every 15 minutes (cached in `data\t3-usage\claude-api-cost.json`). "Today" starts at local midnight and "month" at the 1st; costs are after discounts, in US dollars.
+
+It goes through [`ant`](https://github.com/anthropics/anthropic-cli), Anthropic's CLI, which the collector finds at `%LOCALAPPDATA%\Programs\ant\ant.exe` or on `PATH`. To install it, download `ant_<version>_windows_amd64.zip` from the releases, check it against `ant_<version>_checksums.txt`, and put `ant.exe` in that folder. Then pick one way to sign in:
+
+- **Browser sign-in (recommended, no long-lived key):** `& "$env:LOCALAPPDATA\Programs\ant\ant.exe" auth login --admin` in PowerShell, as an organization admin. `ant` stores and refreshes the token itself.
+- **Admin API key:** create one at [platform.claude.com/settings/admin-keys](https://platform.claude.com/settings/admin-keys), ideally with an expiry, then run `powershell -NoProfile -File "$env:USERPROFILE\.config\herdr-app\mods\t3-usage\set-claude-admin-key.ps1"` and paste it into the hidden prompt. It's saved with Windows DPAPI (this Windows user only) as `data\t3-usage\claude-admin-key.dpapi`, which is never synced, and handed to `ant` on stdin, never on its command line. `-Remove` deletes it. A stored key wins over the browser sign-in.
+
+The line says `not set up` until one of those exists, `sign-in or Admin key rejected` on a 401/403 (or a sign-in without `org:admin`), `no data yet` before the API has any for the range, and `unavailable` on other errors. The key, tokens and `ant`'s messages never reach the panel or its output.
+
 ### Hide and show
 
 - **Hide:** click the `×` next to the refresh icon in the panel's heading, click **Hide AI usage** in the sidebar footer, or press `ctrl-shift-u`.

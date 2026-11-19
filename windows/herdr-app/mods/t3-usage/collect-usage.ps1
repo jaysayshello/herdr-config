@@ -2,7 +2,9 @@ param(
     [string]$HomePath = $env:USERPROFILE,
     [datetime]$NowUtc = [datetime]::UtcNow,
     [datetime]$PeriodStartUtc,
-    [switch]$SkipLiveQuota
+    [switch]$SkipLiveQuota,
+    # Tests only: a stand-in for ant.exe. Without it, -SkipLiveQuota also skips API cost.
+    [string]$AntPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1207,6 +1209,141 @@ function Get-OpenAiLiveQuota {
     }
 }
 
+# Claude API cost (Usage and Cost Analytics API, through Anthropic's `ant` CLI): what the
+# Console organization spent today and this month. It covers API and Console usage, not a
+# Pro/Max subscription. The API's data lags (usually under 4 h, up to 24 h), so it's fetched at
+# most every 15 minutes and shown with its `data_refreshed_at`.
+# Credentials: an Admin API key stored by set-claude-admin-key.ps1 (DPAPI, this Windows user
+# only) and handed to ant on stdin, never on the command line; otherwise ant's own sign-in
+# (`ant auth login --admin`). The key and ant's messages are never part of the output.
+$ApiCostEvery = [timespan]::FromMinutes(15)
+$AntTimeoutMs = 15000
+
+function Find-Ant {
+    if ($AntPath) { return $AntPath }
+    $installed = Join-Path $env:LOCALAPPDATA 'Programs\ant\ant.exe'
+    if ([IO.File]::Exists($installed)) { return $installed }
+    $onPath = Get-Command ant.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Get-AdminKey {
+    param([string]$DataDir)
+    $file = Join-Path $DataDir 'claude-admin-key.dpapi'
+    if (-not [IO.File]::Exists($file)) { return $null }
+    $secure = [IO.File]::ReadAllText($file).Trim() | ConvertTo-SecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+}
+
+function Invoke-Ant {
+    param([string]$Ant, [string]$Arguments, [string]$StandardInput)
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Ant
+    $startInfo.Arguments = $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if ($StandardInput) { $process.StandardInput.Write($StandardInput) }
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit($AntTimeoutMs)) {
+            try { $process.Kill() } catch {}
+            throw 'ant timed out.'
+        }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            # stderr only decides which kind of failure this was; its text goes nowhere.
+            if ($stderr.Result -match '\b(401|403)\b|authentication_error|permission_error|not configured|ant auth login') { throw 'ant auth failed.' }
+            throw 'ant failed.'
+        }
+        return $stdout.Result
+    }
+    finally { $process.Dispose() }
+}
+
+function Read-CostPage {
+    param([string]$Json)
+    $page = $Json | ConvertFrom-Json -ErrorAction Stop
+    [decimal]$cents = 0
+    foreach ($row in @($page.data | Where-Object { $null -ne $_ })) {
+        $amount = Get-JsonProperty (Get-JsonProperty $row 'cost') 'amount'
+        [decimal]$value = 0
+        if (-not [decimal]::TryParse([string]$amount, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -or $value -lt 0) {
+            throw 'Invalid cost amount.'
+        }
+        $cents += $value
+    }
+    return [pscustomobject]@{
+        Usd = [double][Math]::Round($cents / 100, 2, [MidpointRounding]::AwayFromZero)
+        RefreshedAt = Convert-ToUtcDateTimeOffset (Get-JsonProperty $page 'data_refreshed_at')
+    }
+}
+
+function Get-ClaudeApiCost {
+    param(
+        [string]$HomeRoot,
+        [datetimeoffset]$Now,
+        [datetimeoffset]$DayStart,
+        [switch]$Skip
+    )
+
+    if ($Skip -and -not $AntPath) { return [ordered]@{ state = 'unavailable' } }
+    $dataDir = [IO.Path]::Combine($HomeRoot, '.config', 'herdr-app', 'data', 't3-usage')
+    $cachePath = Join-Path $dataDir 'claude-api-cost.json'
+    $iso = { param($t) $t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    try {
+        if ([IO.File]::Exists($cachePath)) {
+            $cached = [IO.File]::ReadAllText($cachePath) | ConvertFrom-Json
+            $fetchedAt = Convert-ToUtcDateTimeOffset $cached.fetchedAt
+            if ($null -ne $fetchedAt -and $fetchedAt -le $Now -and ($Now - $fetchedAt) -lt $ApiCostEvery -and $cached.dayStart -eq (& $iso $DayStart)) {
+                $result = [ordered]@{ state = 'ok'; todayUsd = [double]$cached.todayUsd; monthUsd = [double]$cached.monthUsd }
+                if ($cached.refreshedAt) { $result['refreshedAt'] = $cached.refreshedAt }
+                return $result
+            }
+        }
+    }
+    catch {}
+
+    try {
+        $ant = Find-Ant
+        if (-not $ant) { return [ordered]@{ state = 'unconfigured' } }
+        $key = Get-AdminKey -DataDir $dataDir
+        $signedIn = [IO.File]::Exists((Join-Path $env:APPDATA 'Anthropic\credentials\default.json'))
+        if (-not $key -and -not $signedIn -and -not $AntPath) { return [ordered]@{ state = 'unconfigured' } }
+
+        $localNow = [TimeZoneInfo]::ConvertTime($Now, [TimeZoneInfo]::Local)
+        $monthStart = Convert-LocalBoundaryToUtc -Value (New-Object datetime($localNow.Year, $localNow.Month, 1)) -TimeZone ([TimeZoneInfo]::Local)
+        $stdinFlag = if ($key) { '--api-key-stdin ' } else { '' }
+        $call = { param($start) Read-CostPage (Invoke-Ant -Ant $ant -StandardInput $key -Arguments ("$stdinFlag--format raw beta:organization:analytics:cost list --starting-at " + (& $iso $start))) }
+        $today = & $call $DayStart
+        $month = & $call $monthStart
+    }
+    catch {
+        # A rejected key or sign-in, or a missing org:admin scope, says so; other failures don't.
+        return [ordered]@{ state = if ("$_" -eq 'ant auth failed.') { 'auth_failed' } else { 'error' } }
+    }
+    finally { $key = $null }
+
+    $refreshed = @($today.RefreshedAt, $month.RefreshedAt) | Where-Object { $null -ne $_ } | Sort-Object | Select-Object -First 1
+    $result = [ordered]@{ state = 'ok'; todayUsd = $today.Usd; monthUsd = $month.Usd }
+    if ($null -ne $refreshed) { $result['refreshedAt'] = $refreshed.ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
+    try {
+        [void][IO.Directory]::CreateDirectory($dataDir)
+        $cache = [ordered]@{ fetchedAt = $Now.ToString('o', [Globalization.CultureInfo]::InvariantCulture); dayStart = (& $iso $DayStart); todayUsd = $result.todayUsd; monthUsd = $result.monthUsd; refreshedAt = $result['refreshedAt'] }
+        [IO.File]::WriteAllText($cachePath, ($cache | ConvertTo-Json -Compress))
+    }
+    catch {}
+    return $result
+}
+
 function Add-QuotaToUsage {
     param(
         [System.Collections.IDictionary]$Usage,
@@ -1245,6 +1382,7 @@ try {
     $openAiUsage = Get-OpenAiUsage -Root $openAiRoot -Cutoff $periodStart -Through $effectiveNow
     $claudeQuota = Get-ClaudeQuota -HomeRoot $HomePath -Now $effectiveNow
     $openAiQuota = Get-OpenAiQuota -HomeRoot $HomePath -Now $effectiveNow -Skip:$SkipLiveQuota
+    $claudeUsage['apiCost'] = Get-ClaudeApiCost -HomeRoot $HomePath -Now $effectiveNow -DayStart $periodStart -Skip:$SkipLiveQuota
 
     $document = [ordered]@{
         schema = 2
