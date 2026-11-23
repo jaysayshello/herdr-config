@@ -142,7 +142,13 @@ export default class PullRequests extends View {
     this.back = null;
     cx.spawn(async (cx) => {
       for (;;) {
-        await this.load(cx);
+        // One poll that throws must not end the loop: the list would then stay as it is until Herdr
+        // restarts. A replaced or closed build still ends here, at its cx.sleep.
+        try {
+          await this.load(cx);
+        } catch (e) {
+          this.error = String(e?.message ?? e);
+        }
         await cx.sleep(EVERY);
       }
     });
@@ -616,7 +622,8 @@ export default class PullRequests extends View {
           .role("button").accessibility_label("Refresh pull requests")
           .text_color(t.dim)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => { this.load(cx, true); })
+          // A click's cx is valid only during the click, and load() awaits gh: give it a task cx.
+          .on_click((_e, cx) => { cx.spawn(async (cx) => this.load(cx, true)); })
           .child(svg("mods/t3-prs/refresh.svg").size(13).when(this.manual, (el) => el.spin(900)))))
       .when(Boolean(note), (el) => el.child(div().px(16).pb(4).text_size(12).text_color(this.error ? t.ansi1 : t.dim).child(note)))
       .child(v_flex().id("prs-list").flex_1().min_h(0).px(8).overflow_y_scroll().children(rows));
