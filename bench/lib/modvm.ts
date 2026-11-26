@@ -93,6 +93,8 @@ function method(key: string) {
 		if (key === "when") {
 			if (args[0]) args[1](this);
 		} else if (key === "child") node.items.push(args[0]);
+		// A slot (a HoverCard's trigger and card) is drawn by its component: kept as a child, so find() reaches it.
+		else if (key === "trigger" || key === "content") node.items.push(args[0]);
 		else if (key === "children") node.items.push(...args[0]);
 		else if (key === "id") node.key = args[0];
 		else if (key === "tooltip") node.tooltip = args[0];
@@ -269,7 +271,10 @@ plugin({
 		build.module("gpui-kit", () => ({ loader: "object", exports: { View, div: factory("div"), svg: factory("svg"), image: factory("image"), list: factory("list"), uniform_list: factory("list") } }));
 		build.module("gpui-base", () => ({
 			loader: "object",
-			exports: { h_flex: factory("h_flex"), v_flex: factory("v_flex"), Popover: factory("popover"), Input: factory("input"), InputState: factory("input-state") },
+			exports: {
+				h_flex: factory("h_flex"), v_flex: factory("v_flex"), Popover: factory("popover"), Input: factory("input"), InputState: factory("input-state"),
+				HoverCard: { new: (id: string) => element("hovercard").id(id) },
+			},
 		}));
 	},
 });

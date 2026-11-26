@@ -227,12 +227,14 @@ The orchestrator sends work to omp and Claude Code terminals (Herdr app `omp` or
 The sidebar can show the [beads](https://github.com/gastownhall/beads) progress of the space you are looking at, under Pull requests. Beads (`bd`) is an issue tracker for coding agents. Install it with `brew install beads`.
 
 - To show or hide it, press `cmd-alt-b`, click Show beads or Hide beads in the sidebar footer, or click the `×` in the panel's heading. It is hidden at first. Herdr remembers the choice after a restart (`layout.toggle` on the layout block `beads`).
-- It shows `N of M done` with a bar (done, in progress and blocked), the open epics with their own bars, and then the beads that are in progress, ready and blocked. It shows up to 8 of each. Hover over a bead to see its id, type and priority. You can fold each heading.
+- It shows `N of M done` with a bar (done, in progress and blocked). Under Now, it shows each bead an agent is on (`in_progress`), with a turning arc and a slow pulse. Under Up next, it shows the first ready bead, from the current epic first.
+- Under Epic, it shows the epic of the bead in progress (else of the next bead, else the first open epic), with its bar and all its tasks in order. Each task is marked done, in progress, ready or waiting. Beads outside that epic are in a folded Not in this epic list.
+- Hover over a bead to see a card with two plain lines: what the bead is (the first sentence of its description, without links), and where it stands ("Ready to start. High priority.", "Waiting on: <bead>" or "Being worked on now by <name>, started 12 min ago."). `plan.js` makes both from `bd`'s lists.
 - It uses the folder where the space's first terminal is now, the same way Herdr's own mods find a space's repo. `bd` finds `.beads` there or in a folder above it. For a space on another machine, `bd` runs on that machine.
 - When a folder has no beads yet, the panel offers Set up beads here. After you confirm, it runs `bd init --stealth --skip-agents --skip-hooks` in the git repo's top folder (or in the folder itself) with `BEADS_DIR` set. So a folder that is not a git repo does not get a `git init`. `.git/info/exclude` keeps beads out of commits, and it writes no AGENTS.md or hooks.
 - It watches the `.beads` folder for changes. Each `bd` read rewrites Dolt's manifest and journal files, so the panel reads again only when the manifest's text changes (that is, after a write), not after its own reads. On another machine, with a Dolt server (`bd init --server`), or before beads is set up, it checks every 30 seconds instead.
 - It reads only with `bd --readonly`, and only while you can see it (not when it is hidden, when the sidebar is hidden, or when the Inbox shows).
-- `tests/run.sh --test-name-pattern "done bar|offers setup"` runs the panel against the real `bd` (`tests/beads-panel.test.ts`).
+- `tests/run.sh --test-name-pattern "in progress, the next|offers setup|Inbox"` runs the panel against the real `bd` (`tests/beads-panel.test.ts`).
 
 ## Windows
 
