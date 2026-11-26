@@ -1,11 +1,12 @@
 // The Beads panel (herdr-app/mods/t3-beads/main.js) in lib/modvm.ts, against the real bd on a beads
-// workspace in a temporary folder: it reads the shown space's progress, and sets beads up in a folder
-// that has none without running git init there.
+// workspace in a temporary folder: it shows the bead in progress, the next one and the epic's tasks,
+// with a two-line card for each, and sets beads up in a folder that has none without git init.
 import { afterAll, beforeEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { command, find, host, loadMod, ModVm, resetHost } from "../bench/lib/modvm.ts";
+import { about } from "../herdr-app/mods/t3-beads/plan.js";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "beads-panel-"));
 // The sandbox HOME has no bd settings: keep bd's usage metrics off for every bd this test runs.
@@ -49,13 +50,14 @@ async function until(vm: ModVm, ok: () => boolean) {
 }
 const last = (vm: ModVm) => vm.draws.at(-1)?.tree;
 
-test("shows the done bar, epics, and the in progress, ready and blocked beads", async () => {
+test("shows the bead in progress, the next one, and the epic's tasks in order", async () => {
 	const dir = path.join(tmp, "project");
 	fs.mkdirSync(dir);
 	expect(sh("env", [`BEADS_DIR=${dir}/.beads`, "bd", "init", "--quiet", "--stealth", "--skip-agents", "--skip-hooks", "--non-interactive", "-p", "pj"], dir).code).toBe(0);
 	const epic = bd(dir, "create", "Ship it", "-t", "epic", "-p", "1").id;
-	const doing = bd(dir, "create", "Write it", "-p", "1", "--parent", epic).id;
+	const doing = bd(dir, "create", "Write it", "-p", "1", "--parent", epic, "-d", "PR: https://example.com/pull/1. Adds the panel so you can see beads. More detail here.").id;
 	const done = bd(dir, "create", "Plan it", "-p", "2", "--parent", epic).id;
+	const todo = bd(dir, "create", "Test it", "-p", "2", "--parent", epic).id;
 	const docs = bd(dir, "create", "Docs", "-p", "3").id;
 	sh("bd", ["dep", "add", docs, doing], dir);
 	sh("bd", ["update", doing, "--claim"], dir);
@@ -66,12 +68,19 @@ test("shows the done bar, epics, and the in progress, ready and blocked beads", 
 	vm.draw();
 	expect(await until(vm, () => Boolean(find(last(vm), "beads-bar")))).toBe(true);
 	const tree = last(vm);
+	expect(find(tree, `bead-now-${doing}`)).not.toBeNull();
+	expect(find(tree, `bead-next-${todo}`)).not.toBeNull();
 	expect(find(tree, `epic-${epic}`)).not.toBeNull();
-	expect(find(tree, `bead-active-${doing}`)).not.toBeNull();
-	expect(find(tree, `bead-blocked-${docs}`)).not.toBeNull();
-	// The epic is ready to bd, but the Ready list holds work only.
-	expect(find(tree, `bead-ready-${epic}`)).toBeNull();
-	expect(find(tree, "beads-setup")).toBeNull();
+	for (const id of [doing, done, todo]) expect(find(tree, `bead-epic-${id}`)).not.toBeNull();
+	// Outside the epic: counted, folded until clicked.
+	expect(find(tree, "beads-others")).not.toBeNull();
+	expect(find(tree, `bead-other-${docs}`)).toBeNull();
+	// The hover card: what the bead is (first sentence, no link), and where it stands.
+	const p = vm.mod.data.plan;
+	expect(about(p.beads.get(doing), p)).toEqual(["Adds the panel so you can see beads.", expect.stringMatching(/^Being worked on now/)]);
+	expect(about(p.beads.get(docs), p)[1]).toBe("Waiting on: Write it");
+	expect(about(p.beads.get(todo), p)[1]).toBe("Ready to start. Normal priority.");
+	expect(find(tree, `card-epic-${todo}`)).not.toBeNull();
 	// Reads only: nothing claimed or closed by the panel.
 	expect(bd(dir, "show", doing)[0].status).toBe("in_progress");
 }, 60_000);

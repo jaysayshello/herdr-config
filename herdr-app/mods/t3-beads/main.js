@@ -1,14 +1,17 @@
-// Beads (bd, github.com/gastownhall/beads) progress of the shown space: a done bar, the counts, the
-// open epics and the in progress, ready and blocked beads. The space's folder is where its first
+// Beads (bd, github.com/gastownhall/beads) progress of the shown space: a done bar, the bead an
+// agent is on now (animated), the next one, and the epic they belong to with its tasks in order.
+// Hovering a bead shows what it is and where it stands. The space's folder is where its first
 // terminal is now, as Herdr's own mods take a space's repo; bd finds .beads in it or above it.
 // Layout node "beads", hidden by default: cmd-alt-b or the sidebar footer row shows it.
 import { View, div, svg } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
+import { h_flex, v_flex, HoverCard } from "gpui-base";
 import { spaces, panes, exec, readTextFile, watchFolder, theme, layout, run, openOverlay, notify, nextCommand, checking } from "herdr";
+import { plan, about } from "./plan.js";
 
 const NODE = "beads";
 // Only for what no folder watch sees: another machine, or a folder with no beads yet.
 const EVERY = 30000;
+// Rows of the folded "Not in this epic" list, once opened.
 const ROWS = 8;
 
 // null: no node `id` under node. Else whether it is off screen: it or a node above it hidden, or a
@@ -120,15 +123,16 @@ export default class Beads extends View {
             this.manifests.set(manifest, await readTextFile(manifest).catch(() => null));
           }
         }
-        const [status, active, ready, blocked, epics] = await Promise.all([
+        const [status, all, open, ready, blocked] = await Promise.all([
           bd(["status", "--json"], loc),
-          bd(["list", "--json", "--brief", "--status", "in_progress", "-n", "0"], loc),
+          bd(["list", "--json", "--all", "--brief", "-n", "0"], loc),
+          // Descriptions for the hover cards, only of the beads not closed.
+          bd(["list", "--json", "--status", "open,in_progress,blocked,deferred", "-n", "0"], loc),
           bd(["ready", "--json", "--brief", "--exclude-type", "epic", "-n", "0"], loc),
           bd(["blocked", "--json"], loc),
-          bd(["epic", "status", "--json"], loc),
         ]);
         if (!this.current(context)) return;
-        this.data = { where, summary: status?.summary ?? {}, active: active ?? [], ready: ready ?? [], blocked: blocked ?? [], epics: epics ?? [] };
+        this.data = { where, summary: status?.summary ?? {}, plan: plan(all ?? [], open ?? [], ready ?? [], blocked ?? []) };
         this.error = null;
         if (embedded) this.watch(where.path, context, cx);
       } catch (e) {
@@ -189,8 +193,13 @@ export default class Beads extends View {
     this.refresh(cx);
   }
 
+  // "others" starts folded: the panel is about the epic.
+  isFolded(id) {
+    return this.folded[id] ?? id === "others";
+  }
+
   fold(id) {
-    this.folded[id] = !this.folded[id];
+    this.folded[id] = !this.isFolded(id);
     localStorage.setItem("folded", JSON.stringify(this.folded));
   }
 
@@ -202,64 +211,87 @@ export default class Beads extends View {
       .when(rest > 0, (el) => el.child(div().h_full().flex_grow(rest)));
   }
 
-  header(t, id, label, count) {
-    const open = !this.folded[id];
-    return h_flex().id(`beads-${id}`).px(8).pt(8).h(30).flex_none().gap(4).items_center().text_size(11).font_medium()
-      .on_click((_e, cx) => { this.fold(id); cx.notify(); })
-      .child(div().text_color(t.dim).child(label))
-      .child(div().text_color(t.dim).child(String(count)))
+  label(t, id, text, count, foldable) {
+    return h_flex().id(`beads-${id}`).px(8).pt(10).pb(2).flex_none().gap(4).items_center().text_size(11).font_medium()
+      .when(foldable, (el) => el.on_click((_e, cx) => { this.fold(id); cx.notify(); }))
+      .child(div().text_color(t.dim).child(text))
+      .when(count != null, (el) => el.child(div().text_color(t.dim).child(String(count))))
       .child(div().flex_1())
-      .when(!open, (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(12).flex_none().text_color(t.dim)));
+      .when(foldable && this.isFolded(id), (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(12).flex_none().text_color(t.dim)));
   }
 
-  row(t, group, b, extra) {
-    const p = b.priority ?? 2;
-    const tip = [`${b.id}: ${b.title}`, `${b.issue_type ?? "task"} · P${p} · ${b.status}`, extra?.tip].filter(Boolean).join("\n");
-    return h_flex().id(`bead-${group}-${b.id}`).w_full().min_w(0).px(8).h(26).flex_none().rounded(8).items_center().gap(8)
-      .tooltip(tip).hover((s) => s.bg(t.foreground + "26"))
-      .child(div().w(20).flex_none().text_size(11).font_medium().text_color(p === 0 ? t.ansi1 : p === 1 ? t.ansi3 : t.dim).child(`P${p}`))
-      .child(div().min_w(0).truncate().text_color(t.foreground).child(b.title))
-      .child(div().flex_1().flex_shrink(1000).min_w(0).truncate().text_size(12).text_color(t.dim).child(extra?.note ?? b.id));
+  // The bead's state as a shape: a turning arc (an agent is on it), a check, a clock, a ring.
+  mark(t, s) {
+    const box = h_flex().size(16).flex_none().items_center().justify_center();
+    if (s === "working") return box.child(svg("mods/workspace-chrome/spinner.svg").size(13).text_color(t.working).spin(1000));
+    if (s === "done") return box.child(svg("mods/workspace-chrome/check.svg").size(13).text_color(t.done));
+    if (s === "blocked") return box.child(svg("mods/workspace-chrome/clock.svg").size(12).text_color(t.blocked));
+    if (s === "later") return box.child(svg("mods/workspace-chrome/minus.svg").size(12).text_color(t.dim));
+    return box.child(div().size(8).rounded_full().border(1.5).border_color(t.muted));
   }
 
-  group(t, id, label, list, extra) {
-    if (!list.length) return [];
-    const rows = this.folded[id] ? [] : list.slice(0, ROWS).map((b) => this.row(t, id, b, extra?.(b)));
-    if (!this.folded[id] && list.length > ROWS) rows.push(div().id(`beads-${id}-more`).px(8).h(22).flex_none().text_size(11).text_color(t.dim).child(`and ${list.length - ROWS} more`));
-    return [this.header(t, id, label, list.length), ...rows];
-  }
-
-  epic(t, e) {
-    const done = e.closed_children ?? 0, total = e.total_children ?? 0;
-    return v_flex().id(`epic-${e.epic.id}`).px(8).py(4).gap(4).flex_none().tooltip(`${e.epic.id}: ${e.epic.title}`)
-      .child(h_flex().min_w(0).gap(8).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(e.epic.title))
-        .child(div().flex_none().text_size(11).text_color(e.eligible_for_close ? t.done : t.dim).child(`${done}/${total}`)))
-      .child(this.bar(t, `epic-bar-${e.epic.id}`, [{ n: done, color: t.done }], Math.max(total, 1)));
+  // One bead, with its two-line card on hover. `now`: the row pulses while an agent is on it.
+  row(t, group, b, { now = false, note } = {}) {
+    const p = this.data.plan, s = p.state(b), pr = b.priority ?? 2;
+    const [what, where] = about(b, p);
+    const row = h_flex().id(`bead-${group}-${b.id}`).relative().w_full().min_w(0).px(8).h(28).flex_none().rounded(8).items_center().gap(8)
+      .accessibility_label(`${b.title}. ${what} ${where}`)
+      .hover((st) => st.bg(t.foreground + "1f"))
+      .when(now, (el) => el.child(div().absolute().inset(0).rounded(8).bg(t.working + "2e").border(1).border_color(t.working + "66")
+        .loop("opacity", { from: 0.35, to: 1, period: 1600 })))
+      .child(this.mark(t, s))
+      .child(div().flex_1().min_w(0).truncate().text_color(s === "done" ? t.dim : t.foreground).child(b.title))
+      .when(Boolean(note), (el) => el.child(div().flex_none().max_w(120).truncate().text_size(11).text_color(t.dim).child(note)))
+      .when(s !== "done", (el) => el.child(div().flex_none().text_size(11).font_medium().text_color(pr === 0 ? t.ansi1 : pr === 1 ? t.ansi3 : t.dim).child(`P${pr}`)));
+    const card = v_flex().w(320).p(10).gap(6).rounded(8).bg(t.popover).border_1().border_color(t.border).text_size(12)
+      .child(div().whitespace_normal().text_color(t.foreground).child(what))
+      .child(h_flex().gap(6).items_start()
+        .child(div().mt(4).size(6).flex_none().rounded_full().bg(s === "working" ? t.working : s === "blocked" ? t.blocked : s === "done" ? t.done : t.muted))
+        .child(div().flex_1().min_w(0).whitespace_normal().text_color(t.muted).child(where)));
+    return HoverCard.new(`card-${group}-${b.id}`).open_delay(350).trigger(row).content(card);
   }
 
   body(t) {
-    const d = this.data, s = d.summary;
-    const total = s.total_issues ?? 0, closed = s.closed_issues ?? 0, active = s.in_progress_issues ?? 0, blocked = s.blocked_issues ?? 0;
+    const d = this.data, s = d.summary, p = d.plan;
+    const total = s.total_issues ?? 0, closed = s.closed_issues ?? 0;
     const pct = total ? Math.round((closed / total) * 100) : 0;
-    // The lists, not the summary: bd's ready count includes epics, which the Ready list leaves out.
-    const counts = [`${d.active.length} in progress`, `${d.ready.length} ready`, `${d.blocked.length} blocked`].join(" · ");
-    const epics = d.epics.filter((e) => e.epic?.status !== "closed");
-    return [
-      v_flex().id("beads-summary").px(8).pt(2).pb(6).gap(5).flex_none()
+    const counts = [`${p.counts.working} in progress`, `${p.counts.ready} ready`, `${p.counts.blocked} blocked`].join(" · ");
+    const out = [
+      v_flex().id("beads-summary").px(8).pt(2).pb(2).gap(5).flex_none()
         .child(h_flex().items_center().text_size(13)
           .child(div().font_medium().text_color(t.foreground).child(total ? `${closed} of ${total} done` : "No beads yet"))
           .child(div().flex_1())
           .when(total > 0, (el) => el.child(div().text_size(12).text_color(t.muted).child(`${pct}%`))))
         .when(total > 0, (el) => el.child(this.bar(t, "beads-bar", [
-          { n: closed, color: t.done }, { n: active, color: t.working }, { n: blocked, color: t.blocked },
+          { n: closed, color: t.done }, { n: p.counts.working, color: t.working }, { n: p.counts.blocked, color: t.blocked },
         ], total)))
         .when(total > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(counts))),
-      ...(epics.length ? [this.header(t, "epics", "Epics", epics.length), ...(this.folded.epics ? [] : epics.map((e) => this.epic(t, e)))] : []),
-      ...this.group(t, "active", "In progress", d.active, (b) => b.assignee ? { note: b.assignee } : null),
-      ...this.group(t, "ready", "Ready", d.ready),
-      ...this.group(t, "blocked", "Blocked", d.blocked, (b) => b.blocked_by?.length ? { note: `by ${b.blocked_by.join(", ")}`, tip: `Blocked by ${b.blocked_by.join(", ")}` } : null),
     ];
+    if (!total) return out;
+    out.push(this.label(t, "now", "Now"));
+    if (p.now.length) out.push(...p.now.map((b) => this.row(t, "now", b, { now: true, note: b.assignee })));
+    else out.push(div().id("beads-idle").px(8).h(24).flex_none().flex().items_center().text_size(12).text_color(t.dim).child("No bead is in progress."));
+    if (p.next) out.push(this.label(t, "next", "Up next"), this.row(t, "next", p.next));
+    if (p.epic) {
+      out.push(v_flex().id(`epic-${p.epic.id}`).px(8).pt(12).pb(4).gap(5).flex_none()
+        .child(h_flex().min_w(0).gap(8).items_center().text_size(11).font_medium()
+          .child(div().flex_none().text_color(t.dim).child("Epic"))
+          .child(div().flex_1())
+          .child(div().flex_none().text_color(p.done === p.list.length && p.list.length ? t.done : t.dim).child(`${p.done}/${p.list.length}`)))
+        .child(div().min_w(0).truncate().font_medium().text_color(t.foreground).child(p.epic.title))
+        .child(this.bar(t, `epic-bar-${p.epic.id}`, [{ n: p.done, color: t.done }], Math.max(p.list.length, 1))));
+      out.push(...p.list.map((b) => this.row(t, "epic", b, { now: p.state(b) === "working" })));
+      if (p.otherEpics) out.push(div().id("beads-more-epics").px(8).pt(4).h(22).flex_none().text_size(11).text_color(t.dim)
+        .child(`${p.otherEpics} more open ${p.otherEpics === 1 ? "epic" : "epics"}`));
+    }
+    if (p.others.length) {
+      out.push(this.label(t, "others", p.epic ? "Not in this epic" : "Open beads", p.others.length, true));
+      if (!this.isFolded("others")) {
+        out.push(...p.others.slice(0, ROWS).map((b) => this.row(t, "other", b, { now: p.state(b) === "working" })));
+        if (p.others.length > ROWS) out.push(div().id("beads-others-more").px(8).h(22).flex_none().text_size(11).text_color(t.dim).child(`and ${p.others.length - ROWS} more`));
+      }
+    }
+    return out;
   }
 
   render(cx) {
