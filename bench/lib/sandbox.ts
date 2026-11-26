@@ -25,7 +25,7 @@ export interface Sandbox {
 }
 
 // The mods the person made (sync.sh's list); Herdr installs its shipped mods by itself.
-export const MODS = ["t3-agents", "t3-chrome", "t3-inbox", "t3-menu", "t3-new-menu", "t3-pane", "t3-prs", "t3-spaces", "t3-tabs", "tmux-keys"];
+export const MODS = ["t3-agents", "t3-beads", "t3-chrome", "t3-inbox", "t3-menu", "t3-new-menu", "t3-pane", "t3-prs", "t3-spaces", "t3-tabs", "tmux-keys"];
 // omp's own files that a test omp may share: config and caches. Sessions, history and memory
 // outboxes stay separate so the person's session list and prompt history stay clean.
 // agent.db (the login) stays linked: a test omp that refreshes a token must refresh the person's

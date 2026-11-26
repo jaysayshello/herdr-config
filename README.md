@@ -23,7 +23,7 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `herdr/scripts/` | `balance-panes.sh` (`ctrl+r`), `swap-or-vim.sh` (`ctrl+h/j/k/l`) |
 | `herdr-app/keys.json` | Desktop app keys; `layout:herdr-t3` mirrors the terminal keys |
 | `herdr-app/settings.json` | Zoom, sounds |
-| `herdr-app/layouts/herdr-t3.json` | The layout: sidebar (Spaces, Pull requests), work area, hidden tab bar |
+| `herdr-app/layouts/herdr-t3.json` | The layout: sidebar (Spaces, Pull requests, Beads hidden by default), work area, hidden tab bar |
 | `herdr-app/themes/ghostty.json` | Theme matched to Ghostty |
 | `herdr-app/scripts/balance-panes.sh` | Equal pane sizes for `ctrl-r` |
 | `herdr-app/scripts/herdr-focus.sh` | Opens a `herdr-focus://<space-id>/<terminal>` link: shows that terminal and pulses its pane border bright green for about 6 s. Herdr draws the focus border only on the focused pane, so the script switches the layout's focus colour, then puts the layout file back. `herdr-focus.applescript` is the macOS handler for the scheme; `herdr-focus-install.sh` builds it as `~/Applications/Herdr Focus.app` (`sync.sh --restore` runs it) |
@@ -31,7 +31,8 @@ The script copies files. It doesn't symlink them, because Herdr writes its files
 | `herdr-app/mods/t3-prs/` | Pull requests panel: CI state, code owner approval, comment count, bright green frame when ready to merge, right-click copy (`slackpr`), Move to Ready or Move to Draft (`gh pr ready`, `--undo`), Merge (only when approved, mergeable and clean; asks first; the repo's first permitted method, pinned to the head commit) and close; a foldable Merged section with the last 20 merged PRs, newest first, merge time in Eastern time. PRs in archived repos do not show, because GitHub permits no change to them. `node herdr-app/mods/t3-prs/check-prs.cjs` checks the header folds and Merge |
 | `windows/herdr-app/mods/t3-prs/` | The Windows copy of that panel (gh runs in WSL). It also lists the open PRs of every **other account `gh` is signed in to** (`gh auth login` again, then `gh auth status` shows both), in any repo that account can see, organizations included. The active account still shows only repos it owns. Accounts come from `gh auth status`, so no account names are in this repo. Each PR's actions (merge, ready, close, approvals, comments) run as the account that found it, with that account's token passed from `gh auth token` straight into that one `gh` process; the active account never changes. |
 | `herdr-app/mods/t3-spaces/` | Spaces list: wizard avatars, working spinner, done glow, pinned spaces and sections, orchestrator frame |
-| `herdr-app/mods/t3-chrome/` | Sidebar chrome, tab bar toggle (`cmd-shift-h`) |
+| `herdr-app/mods/t3-chrome/` | Sidebar chrome, tab bar toggle (`cmd-shift-h`), Show/Hide beads footer row |
+| `herdr-app/mods/t3-beads/` | Beads panel: the [beads](https://github.com/gastownhall/beads) (`bd`) progress of the shown space. See [Beads panel](#beads-panel) |
 | `herdr-app/mods/t3-*` | Other cloned mods the layout uses (tabs, pane header, inbox, new menu, agents) |
 | `omp/extensions/herdr-resume.ts` | Each Herdr terminal keeps its own omp session; after a reboot the shell opens it again. The `omp` zsh function that reads it lives in my dotfiles repo. Restores to `~/.omp/agent/extensions/` |
 | `omp/launchagents/com.jay.omp-update.plist` | Runs `omp update` at login and each hour. Restores to `~/Library/LaunchAgents/` |
@@ -82,6 +83,17 @@ Limits:
 ## Claude Code workers
 
 The orchestrator routes work to omp and Claude Code terminals (Herdr app `omp` or `claude`) the same way: `herdr_send`, `herdr_watch` and the PR fix agents' folder search take both. `herdr_new_agent` and `herdr_new_space` start the current mode, from `~/.local/state/herdr-switch/mode` (`omp` or `claude`, written by `/omp` and `/claude`; no file means omp): omp as before, or `claude` itself (not a shell alias). The final answer of a Claude worker comes from its transcript, found by the breadcrumb of the Claude hook in `~/.local/state/claude-herdr-resume/`. PR fix agents always start as omp. `~/.bun/bin/bun test tests/route.test.ts` checks this with fake `hc` and `herdr-app` programs and a temporary home.
+
+## Beads panel
+
+The sidebar can show the [beads](https://github.com/gastownhall/beads) progress of the shown space, under Pull requests. Beads (`bd`) is an issue tracker for coding agents: `brew install beads`.
+
+- **Show or hide:** `cmd-alt-b`, the sidebar footer's `Show beads` / `Hide beads` row, or the `×` in the panel's heading. It is hidden by default. Herdr keeps the choice across restarts (`layout.toggle` on the layout node `beads`).
+- **What it shows:** `N of M done` with a bar (done, in progress and blocked), the open epics with their own bars, then the in progress, ready and blocked beads (8 each; hover for the id, type and priority; the headings fold).
+- **Which folder:** where the space's first terminal is now, as Herdr's own mods take a space's repo. `bd` finds `.beads` there or in a folder above it. On another machine, `bd` runs there.
+- **No beads yet:** the panel offers **Set up beads here**. After you confirm, it runs `bd init --stealth --skip-agents --skip-hooks` in the git repo root (or the folder) with `BEADS_DIR` set, so a folder that is not a git repo gets no `git init`. Beads stays out of commits through `.git/info/exclude`, and no AGENTS.md or hooks are written.
+- **Updates:** a folder watch on `.beads`. Every `bd` read rewrites Dolt's manifest and journal files, so the panel reads again only when the manifest's text changes (a write), not on its own reads. On another machine, with a Dolt server (`bd init --server`), or before beads is set up, it checks every 30 s instead. It reads only with `bd --readonly`, and not while the panel is off screen (hidden, the sidebar hidden, or the Inbox shown).
+- **Check:** `tests/run.sh --test-name-pattern "done bar|offers setup"` runs the panel against the real `bd` (`tests/beads-panel.test.ts`).
 
 ## AI usage panel
 

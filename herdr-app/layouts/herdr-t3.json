@@ -50,6 +50,18 @@
                     "weight": 1.1715784072875977
                   },
                   "min": 90
+                },
+                {
+                  "id": "beads",
+                  "type": "block",
+                  "content": {
+                    "mod": "t3-beads"
+                  },
+                  "size": {
+                    "weight": 1
+                  },
+                  "min": 90,
+                  "hidden": true
                 }
               ]
             },
@@ -76,7 +88,7 @@
             }
           },
           "size": {
-            "px": 71
+            "px": 101
           }
         }
       ],

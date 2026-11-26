@@ -108,6 +108,7 @@
     "ctrl-l": "tmux-keys.swap-right",
     "ctrl-n": "tmux-keys.new-space",
     "cmd-shift-h": "t3-chrome.bars",
+    "cmd-alt-b": "layout.toggle:beads",
     "ctrl-w": "tmux-keys.nav-up",
     "ctrl-s": "tmux-keys.nav-down",
     "ctrl-f": "tmux-keys.orchestrator",
