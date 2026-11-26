@@ -41,7 +41,9 @@ export const host = {
 	closed: [] as unknown[],
 	storage: new Map<string, string>(),
 	spaces: [] as any[],
+	panes: [] as any[],
 	focused: null as unknown,
+	layout: null as unknown,
 	// Commands waiting for the mod's nextCommand(), and the mod's waiting nextCommand() calls.
 	commands: [] as string[],
 	waiters: [] as ((c: string) => void)[],
@@ -50,7 +52,7 @@ export const host = {
 };
 
 export function resetHost(mod = "") {
-	Object.assign(host, { mod, props: {}, calls: [], runs: [], toasts: [], overlays: [], closed: [], commands: [], waiters: [], idle: [], spaces: [], focused: null });
+	Object.assign(host, { mod, props: {}, calls: [], runs: [], toasts: [], overlays: [], closed: [], commands: [], waiters: [], idle: [], spaces: [], panes: [], focused: null, layout: null });
 	host.storage = new Map();
 	host.exec = async () => ({ code: 1, stdout: "", stderr: "modvm: no exec set" });
 }
@@ -240,13 +242,18 @@ export const herdr: Record<string, unknown> = {
 	openOverlay: (o: unknown) => host.overlays.push(o),
 	closeOverlay: (id: unknown) => host.closed.push(id),
 	spaces: () => host.spaces,
+	panes: () => host.panes,
 	focused: () => host.focused,
+	layout: () => host.layout,
+	// As in Herdr, both return promises: no file is there, and no folder event ever comes.
+	readTextFile: async () => null,
+	watchFolder: () => Object.assign(new Promise<string[]>(() => {}), { cancel() {} }),
 	home: () => process.env.HOME,
 	appHome: () => process.env.HERDR_APP_HOME,
 	checking: () => false,
 	shared: () => null,
 };
-for (const name of "hc readTextFile writeTextFile knownAgents pickFolder playSound machines agents panes setAgentOrder terminals layout layouts commands window setWindowTitle setBadge placement themes fonts updates presentUpdateNotes telemetry settings keys setShared watchFolder".split(" "))
+for (const name of "hc writeTextFile knownAgents pickFolder playSound machines agents setAgentOrder terminals layouts commands window setWindowTitle setBadge placement themes fonts updates presentUpdateNotes telemetry settings keys setShared".split(" "))
 	herdr[name] ??= (..._a: unknown[]) => undefined;
 
 class View {}

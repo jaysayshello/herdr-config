@@ -12,8 +12,9 @@ cd "$(dirname "$0")"
 # Only what I made. Herdr's shipped mods/layouts/themes, run-time state (shared.json, view.json,
 # window.json, data/, sockets, logs) and generated files (*.d.ts, jsconfig.json) stay out.
 # spaces.json (pinned spaces and sections) stays out too: it holds the names of work spaces.
-# The shared Mac/Windows mod set stays separate from Windows-only additions.
+# The shared Mac/Windows mod set stays separate from Mac-only and Windows-only additions.
 MODS=$(for m in t3-agents t3-chrome t3-inbox t3-menu t3-new-menu t3-pane t3-prs t3-spaces t3-tabs tmux-keys; do echo "mods/$m"; done)
+MAC_MODS="$MODS mods/t3-beads"
 WINDOWS_MODS="$MODS mods/t3-usage"
 ORCHESTRATOR="$HOME/Projects/herdr-orchestrator-2026-11-08/.omp"
 REX_ORCHESTRATOR="$HOME/Projects/rex-orchestrator-2026-11-15/.omp"
@@ -51,7 +52,7 @@ else
   sync "$HOME/.config/herdr" herdr config.toml scripts
   # shellcheck disable=SC2086
   sync "$HOME/.config/herdr-app" herdr-app \
-    keys.json settings.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts peon $MODS
+    keys.json settings.json layouts/herdr-t3.json layouts/herdr-t3.svg themes/ghostty.json scripts peon $MAC_MODS
   # omp: the hourly `omp update` LaunchAgent (the `omp` zsh function for resume is in my dotfiles repo).
   sync "$HOME/Library/LaunchAgents" omp/launchagents com.jay.omp-update.plist
   # Rex (rex/): keys and actions, the rex-focus:// handler and the Pull requests list; per-terminal

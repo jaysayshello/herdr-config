@@ -23,6 +23,9 @@ const HEADER = { content: { mod: "t3-pane" }, reveal: "always", height: 28, posi
 const STEPS = 12, FRAME = 16;
 const ease = (x) => 1 - (1 - x) ** 3;
 const barsShown = () => !find(layout(), "tabs")?.hidden;
+// The Beads panel (t3-beads, layout node "beads"): Herdr's own layout.toggle hides it with no gap
+// and keeps the choice across restarts; this row is where to find it again once hidden.
+const beadsNode = () => find(layout(), "beads");
 let moving = false;
 async function toggleBars(cx) {
   if (moving) return;
@@ -83,6 +86,8 @@ export default class WorkspaceChrome extends View {
       const shown = barsShown();
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(6).text_size(13)
         .child(row("bars", shown ? "bars-hide" : "bars-show", shown ? "Hide tab bar" : "Show tab bar", () => run("t3-chrome.bars")))
+        .when(Boolean(beadsNode()), el => el.child(row("beads", "beads",
+          beadsNode().hidden ? "Show beads" : "Hide beads", () => run("layout.toggle", { id: "beads" }))))
         .child(row("settings", "settings", "Settings", () => run("app.settings"))
           .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent))));
     }
