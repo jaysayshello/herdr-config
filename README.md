@@ -114,14 +114,15 @@ Space colours and wizard pictures are kept by space id in `shared.json`, so they
 | `herdr/scripts/` | `balance-panes.sh` (`ctrl+r`) and `swap-or-vim.sh` (`ctrl+h/j/k/l`) | `~/.config/herdr/scripts/` |
 | `herdr-app/keys.json` | The desktop app's keys. The `layout:herdr-t3` part copies the terminal app's keys | `~/.config/herdr-app/` |
 | `herdr-app/settings.json` | Zoom and sounds | `~/.config/herdr-app/` |
-| `herdr-app/layouts/herdr-t3.json` | The layout: a sidebar with Spaces and Pull requests, the work area, and a hidden tab bar | `~/.config/herdr-app/layouts/` |
+| `herdr-app/layouts/herdr-t3.json` | The layout: a sidebar with Spaces, Pull requests and Beads (hidden at first), the work area, and a hidden tab bar | `~/.config/herdr-app/layouts/` |
 | `herdr-app/themes/ghostty.json` | Colours that match Ghostty | `~/.config/herdr-app/themes/` |
 | `herdr-app/scripts/balance-panes.sh` | Makes all panes the same size (`ctrl-r`) | `~/.config/herdr-app/scripts/` |
 | `herdr-app/scripts/herdr-focus.sh` | Opens a `herdr-focus://<space-id>/<terminal>` link. It shows that terminal and makes its border flash bright green for about 6 seconds (see [Focus links](#focus-links)) | `~/.config/herdr-app/scripts/` |
 | `herdr-app/mods/tmux-keys/` | Keys that need some logic: swap panes unless vim is open, balance panes, a new space in `~/Projects`, move through the PR list | `~/.config/herdr-app/mods/` |
 | `herdr-app/mods/t3-prs/` | The Pull requests panel (see [Pull requests panel](#pull-requests-panel)) | `~/.config/herdr-app/mods/` |
 | `herdr-app/mods/t3-spaces/` | The Spaces list: a wizard picture for each space, a spinner while an agent works, a glow when it is done, pinned spaces and sections, and a frame around the orchestrator | `~/.config/herdr-app/mods/` |
-| `herdr-app/mods/t3-chrome/` | The sidebar's top and bottom bars, and the key that shows or hides the tab bar (`cmd-shift-h`) | `~/.config/herdr-app/mods/` |
+| `herdr-app/mods/t3-chrome/` | The sidebar's top and bottom bars, the key that shows or hides the tab bar (`cmd-shift-h`), and the Show beads / Hide beads row | `~/.config/herdr-app/mods/` |
+| `herdr-app/mods/t3-beads/` | The Beads panel (see [Beads panel](#beads-panel)). Mac only | `~/.config/herdr-app/mods/` |
 | `herdr-app/mods/t3-*` | The other mods the layout uses: tabs, pane header, inbox, new menu, agents | `~/.config/herdr-app/mods/` |
 | `herdr-app/peon/` | Settings and the banner script for peon-ping, the sound and banner tool for agents | `~/.config/herdr-app/peon/` |
 | `omp/extensions/herdr-resume.ts` | Each Herdr terminal keeps its own omp session. After a reboot, the shell opens that session again. The `omp` zsh function that reads it is in my dotfiles repo | `~/.omp/agent/extensions/` |
@@ -220,6 +221,18 @@ The orchestrator sends work to omp and Claude Code terminals (Herdr app `omp` or
 - The last answer of a Claude worker comes from its transcript. The hook's note in `~/.local/state/claude-herdr-resume/` tells it where the transcript is.
 - PR fix agents always start as omp.
 - `~/.bun/bin/bun test tests/route.test.ts` checks this with fake `hc` and `herdr-app` programs and a temporary home folder.
+
+## Beads panel
+
+The sidebar can show the [beads](https://github.com/gastownhall/beads) progress of the space you are looking at, under Pull requests. Beads (`bd`) is an issue tracker for coding agents. Install it with `brew install beads`.
+
+- To show or hide it, press `cmd-alt-b`, click Show beads or Hide beads in the sidebar footer, or click the `×` in the panel's heading. It is hidden at first. Herdr remembers the choice after a restart (`layout.toggle` on the layout block `beads`).
+- It shows `N of M done` with a bar (done, in progress and blocked), the open epics with their own bars, and then the beads that are in progress, ready and blocked. It shows up to 8 of each. Hover over a bead to see its id, type and priority. You can fold each heading.
+- It uses the folder where the space's first terminal is now, the same way Herdr's own mods find a space's repo. `bd` finds `.beads` there or in a folder above it. For a space on another machine, `bd` runs on that machine.
+- When a folder has no beads yet, the panel offers Set up beads here. After you confirm, it runs `bd init --stealth --skip-agents --skip-hooks` in the git repo's top folder (or in the folder itself) with `BEADS_DIR` set. So a folder that is not a git repo does not get a `git init`. `.git/info/exclude` keeps beads out of commits, and it writes no AGENTS.md or hooks.
+- It watches the `.beads` folder for changes. Each `bd` read rewrites Dolt's manifest and journal files, so the panel reads again only when the manifest's text changes (that is, after a write), not after its own reads. On another machine, with a Dolt server (`bd init --server`), or before beads is set up, it checks every 30 seconds instead.
+- It reads only with `bd --readonly`, and only while you can see it (not when it is hidden, when the sidebar is hidden, or when the Inbox shows).
+- `tests/run.sh --test-name-pattern "done bar|offers setup"` runs the panel against the real `bd` (`tests/beads-panel.test.ts`).
 
 ## Windows
 
