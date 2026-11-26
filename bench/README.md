@@ -20,7 +20,7 @@ The suite never touches the real Herdr window, the real herdr-core, the real omp
 - `lib/guard.ts` stops the suite if `HOME`, the herdr-core session, the app home or a state folder (`herdr-pr-ready`, `herdr-pr-autofix`, `omp-herdr-resume`) is the real one.
 - `gh` on the test `PATH` is a fake (`lib/fakegh.ts`): pull request actions succeed without GitHub. Real GitHub reads go through `lib/github.ts`, which counts their GraphQL points. The result file has the total in `github.pointsSpent`.
 - A test omp starts with the real omp config. The login (`agent.db`), settings, extensions and skills are linked; the model and other caches are copied. Its sessions, history and resume breadcrumbs stay in the sandbox.
-- The code under test is this checkout (`herdr-app/`, `orchestrator/`), or the one `--repo` names, not the live files. A change on a branch is measured before it is synced.
+- The code under test is this checkout (`herdr-app/`, `orchestrator/`), or the one `--repo` names, not the live files. A change on a branch is measured before it is installed.
 
 ## Noise
 
