@@ -88,6 +88,8 @@ export default class Beads extends View {
     const loc = location(), next = key();
     if (next !== this.context?.key) {
       this.context = { key: next };
+      // The epic's task list starts folded in every space, each time.
+      this.epicOpen = false;
       this.data = null; this.error = null; this.none = false; this.loading = false;
       this.watched?.cancel(); this.watched = null; this.watching = null;
       this.manifests = new Map();
@@ -273,14 +275,19 @@ export default class Beads extends View {
     else out.push(div().id("beads-idle").px(8).h(24).flex_none().flex().items_center().text_size(12).text_color(t.dim).child("No bead is in progress."));
     if (p.next) out.push(this.label(t, "next", "Up next"), this.row(t, "next", p.next));
     if (p.epic) {
-      out.push(v_flex().id(`epic-${p.epic.id}`).px(8).pt(12).pb(4).gap(5).flex_none()
+      // The epic folds to its title and bar; the chevron opens its task list (not kept: always starts folded).
+      out.push(v_flex().id(`epic-${p.epic.id}`).px(8).pt(12).pb(4).gap(5).flex_none().rounded(8)
+        .role("button").accessibility_label(`${this.epicOpen ? "Hide" : "Show"} the tasks of ${p.epic.title}`)
+        .hover((st) => st.bg(t.foreground + "14"))
+        .on_click((_e, cx) => { this.epicOpen = !this.epicOpen; cx.notify(); })
         .child(h_flex().min_w(0).gap(8).items_center().text_size(11).font_medium()
           .child(div().flex_none().text_color(t.dim).child("Epic"))
           .child(div().flex_1())
-          .child(div().flex_none().text_color(p.done === p.list.length && p.list.length ? t.done : t.dim).child(`${p.done}/${p.list.length}`)))
+          .child(div().flex_none().text_color(p.done === p.list.length && p.list.length ? t.done : t.dim).child(`${p.done}/${p.list.length}`))
+          .child(svg(`mods/workspace-chrome/chevron-${this.epicOpen ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim)))
         .child(div().min_w(0).truncate().font_medium().text_color(t.foreground).child(p.epic.title))
         .child(this.bar(t, `epic-bar-${p.epic.id}`, [{ n: p.done, color: t.done }], Math.max(p.list.length, 1))));
-      out.push(...p.list.map((b) => this.row(t, "epic", b, { now: p.state(b) === "working" })));
+      if (this.epicOpen) out.push(...p.list.map((b) => this.row(t, "epic", b, { now: p.state(b) === "working" })));
       if (p.otherEpics) out.push(div().id("beads-more-epics").px(8).pt(4).h(22).flex_none().text_size(11).text_color(t.dim)
         .child(`${p.otherEpics} more open ${p.otherEpics === 1 ? "epic" : "epics"}`));
     }
