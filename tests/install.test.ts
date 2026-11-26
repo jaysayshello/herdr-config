@@ -1,12 +1,13 @@
-// Runs install.sh --files-only with HOME in a temp dir. --files-only skips launchctl, the Focus
-// app builds, the reloads and herdr-app, so nothing here reaches the real Mac or Herdr window.
+// Runs install-macos.sh --files-only with HOME in a temp dir. --files-only skips launchctl, the
+// Focus app builds, the reloads and herdr-app, so nothing here reaches the real Mac or Herdr window.
 import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 const REPO = resolve(import.meta.dir, "..");
-const SCRIPT = join(REPO, "install.sh");
+const MACOS = join(REPO, "install-macos.sh");
+const WINDOWS = join(REPO, "install-windows.sh");
 const HOOK = "sh ~/.claude/hooks/herdr-claude.sh";
 const EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "StopFailure", "PreCompact", "SessionEnd"];
 
@@ -26,7 +27,7 @@ beforeEach(() => {
 	orch = join(home, "Projects/herdr-orchestrator-2026-11-08/.omp");
 	mkdirSync(home, { recursive: true });
 	mkdirSync(bin, { recursive: true });
-	// install.sh only looks for rex on PATH; --files-only never runs it.
+	// install-macos.sh only looks for rex on PATH; --files-only never runs it.
 	writeFileSync(join(bin, "rex"), "#!/bin/sh\nexit 1\n");
 	chmodSync(join(bin, "rex"), 0o755);
 });
@@ -40,17 +41,33 @@ function put(file: string, text: string) {
 	writeFileSync(file, text);
 }
 
-async function install() {
-	const proc = Bun.spawn(["sh", SCRIPT, "--files-only"], {
+function run(script: string) {
+	const proc = Bun.spawn(["sh", script, "--files-only"], {
 		env: { HOME: home, PATH: `${bin}:/usr/bin:/bin:${dirname(Bun.which("jq") ?? "/usr/bin/jq")}` },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+	return Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+}
+
+async function install() {
+	const [out, err, code] = await run(MACOS);
 	expect(err).toBe("");
 	expect(code).toBe(0);
 	return out;
 }
+
+test("each script refuses the other system and writes nothing", async () => {
+	const [, winErr, winCode] = await run(WINDOWS);
+	expect(winCode).toBe(1);
+	expect(winErr).toContain("install-windows.sh runs in WSL");
+	writeFileSync(join(bin, "uname"), "#!/bin/sh\necho Linux\n");
+	chmodSync(join(bin, "uname"), 0o755);
+	const [, macErr, macCode] = await run(MACOS);
+	expect(macCode).toBe(1);
+	expect(macErr).toContain("install-macos.sh is for macOS");
+	expect(readdirSync(home)).toEqual([]);
+});
 
 const read = (file: string) => readFileSync(file, "utf8");
 const claudeSettings = () => JSON.parse(read(join(home, ".claude/settings.json")));

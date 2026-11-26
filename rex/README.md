@@ -6,8 +6,8 @@ In Rex, a Herdr space is a session, a tab is a tab (Rex calls it a window), and 
 
 ## Set up
 
-1. Install Rex, then run `./install.sh` from the repo root. On the Mac it copies the files below to their live places and builds `~/Applications/Rex Focus.app`. It skips the Rex files when the `rex` command is not found.
-2. `install.sh` then runs `rex config reload`, so Rex loads the keys at once.
+1. Install Rex, then run `./install-macos.sh` from the repo root. It copies the files below to their live places and builds `~/Applications/Rex Focus.app`. It skips the Rex files when the `rex` command is not found.
+2. `install-macos.sh` then runs `rex config reload`, so Rex loads the keys at once.
 3. In Rex, open Settings > Server > Client Info and turn on Remote Control. The `rex-focus://` links need it to switch sessions. Keys work without it.
 4. Make a Rex session named `orchestrator` in `~/Projects/rex-orchestrator-2026-11-15` and start `omp` there. `Ctrl+F` shows it.
 5. Pull the `omp` zsh functions from the dotfiles repo. They resume each Rex terminal's omp session when Rex restores its sessions.

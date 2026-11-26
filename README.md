@@ -12,44 +12,73 @@ My project notes, the keyboard rules and the full table of keys are in `~/Projec
 
 ## Install
 
-You need Herdr and `jq`. If `jq --version` fails, install it with `brew install jq` (or `sudo apt install jq` in WSL).
+There is one install script for each system. Both need Herdr and `jq`. If `jq --version` fails, install it with `brew install jq` on the Mac, or `sudo apt install jq` in WSL.
+
+| System | Run this | Where to run it |
+|---|---|---|
+| macOS | `./install-macos.sh` | a Mac terminal |
+| Windows | `./install-windows.sh` | a WSL terminal (Herdr's terminals and omp run in WSL) |
+
+Each script stops with a message if you run it on the other system. The code that both scripts use is in `install-common.sh`, which you do not run yourself.
+
+### macOS
 
 ```sh
 git clone https://github.com/jaysayshello/herdr-config
 cd herdr-config
-./install.sh
+./install-macos.sh
 ```
 
-The script copies each file from this repo to the place where the program reads it. The [What's here](#whats-here) table lists each place. On a Mac it installs the Mac files. Run it inside WSL to install the Windows files instead.
+It copies `herdr/`, `herdr-app/`, the LaunchAgent, and the shared files (see below) to the places in the [What's here](#whats-here) table. Then it:
 
-After the copy, it also does these steps:
+- builds `~/Applications/Herdr Focus.app`, which opens `herdr-focus://` links
+- loads the LaunchAgent that runs `omp update` each hour
+- tells the Herdr terminal app to read its config again
+- installs the Rex files, builds `Rex Focus.app` and tells Rex to read its config again, when Rex is installed (the `rex` command exists). Otherwise it skips Rex.
 
-- On the Mac, it builds `~/Applications/Herdr Focus.app`, which opens `herdr-focus://` links. It loads the LaunchAgent that runs `omp update` each hour, and it tells the Herdr terminal app to read its config again.
-- In WSL, it links `herdr-app` into `~/.local/bin` and makes `~/.bashrc` load `omp-resume.bash`. It also turns on the `omp update` timer and makes the Windows login shortcut that starts WSL.
-- On both, it adds the Herdr hook to `~/.claude/settings.json` for each Claude Code event that does not have it yet. Your other hooks and settings stay as they are.
-- When Rex is installed (the `rex` command exists), it installs the Rex files, builds `Rex Focus.app` and tells Rex to read its config again. Otherwise it skips Rex.
-- When the Herdr app is open, it switches the app to the `herdr-t3` layout and prints any file that the app could not load. The app loads changed files by itself, so you do not need to restart it.
+### Windows
 
-The script is safe to run again:
+Run this in WSL:
 
-- It never deletes a file in your live folders. A file that is only on your computer, like an extra omp extension, stays.
-- Before it replaces a file that is different, it saves the old one in `~/.local/state/herdr-config/backup-<date and time>/`, under the file's full path. To undo a run, copy the files back from there.
-- It writes each file to a hidden temporary file first, then moves it into place, so Herdr never reads a half-written file.
+```sh
+git clone https://github.com/jaysayshello/herdr-config
+cd herdr-config
+./install-windows.sh
+```
+
+It copies `windows/herdr-app/` into the Windows app folder (`C:\Users\<me>\.config\herdr-app`), `windows/wsl/` into WSL, and the shared files. Then it:
+
+- links `herdr-app` into `~/.local/bin`, so WSL can call the Windows app
+- makes `~/.bashrc` load `omp-resume.bash`
+- turns on the `omp update` timer
+- makes the Windows login shortcut that starts WSL (see [WSL starts with Herdr](#wsl-starts-with-herdr))
+
+### What both scripts do
+
+- They install the shared files: omp session resume, the orchestrator and the Claude Code hook.
+- They add the Herdr hook to `~/.claude/settings.json` for each Claude Code event that does not have it yet. Your other hooks and settings stay as they are.
+- When the Herdr app is open, they switch it to the `herdr-t3` layout and print any file that the app could not load. The app loads changed files by itself, so you do not need to restart it.
+
+Both scripts are safe to run again:
+
+- They never delete a file in your live folders. A file that is only on your computer, like an extra omp extension, stays.
+- Before they replace a file that is different, they save the old one in `~/.local/state/herdr-config/backup-<date and time>/`, under the file's full path. To undo a run, copy the files back from there.
+- They write each file to a hidden temporary file first, then move it into place, so Herdr never reads a half-written file.
 - When a live file is a symlink (for example, `~/.claude/settings.json` linked to a dotfiles repo), the link stays and the file it points to gets the change.
-- When nothing changed, it prints `All files were already up to date.`
+- When nothing changed, they print `All files were already up to date.`
 
-Options:
+Options (the same for both):
 
-- `./install.sh --files-only` copies the files and does nothing else: no LaunchAgent, no app builds, no reloads.
-- `HERDR_ORCHESTRATOR=<folder>` sets the orchestrator's folder. The default is `~/Projects/herdr-orchestrator-2026-11-08`. `REX_ORCHESTRATOR` does the same for Rex (default `~/Projects/rex-orchestrator-2026-11-15`).
+- `--files-only` copies the files and does nothing else: no LaunchAgent, timer, shortcut, app builds or reloads.
+- `HERDR_ORCHESTRATOR=<folder>` sets the orchestrator's folder. The default is `~/Projects/herdr-orchestrator-2026-11-08`. On the Mac, `REX_ORCHESTRATOR` does the same for Rex (default `~/Projects/rex-orchestrator-2026-11-15`).
 - `HERDR_APP_HOME=<folder>` installs the Herdr app files into another app folder, the same setting the Herdr app uses.
 
-The script copies files instead of making symlinks (links to the repo copy). Herdr saves its files by writing a new file over the old one, which turns a symlink back into a plain file. Herdr also does not load a mod's own images through a symlink.
+The scripts copy files instead of making symlinks (links to the repo copy). Herdr saves its files by writing a new file over the old one, which turns a symlink back into a plain file. Herdr also does not load a mod's own images through a symlink.
 
 ## Make a change
 
 1. Change the file in this repo, on a new branch.
-2. Run `./install.sh` to try it. Herdr shows a change in a mod, a layout or `keys.json` within about a second.
+2. Run `./install-macos.sh` (or `./install-windows.sh` in WSL) to try it. Herdr shows a change in a mod, a layout or `keys.json` within about a second.
 3. Run `tests/run.sh` (see [Tests](#tests)), then open a pull request.
 
 Do not edit the live files and copy them back. The install only goes one way, from the repo to the live folders.
@@ -105,7 +134,7 @@ Space colours and wizard pictures are kept by space id in `shared.json`, so they
 | `rex/` | The Rex app with the same keys as Herdr, a Pull requests tab, `rex-focus://` links, omp session resume and its own orchestrator. Mac only. See `rex/README.md` | see `rex/README.md` |
 | `bench/` | The performance tests. See [Performance tests](#performance-tests) | not installed |
 | `tests/` | The tests. See [Tests](#tests) | not installed |
-| `install.sh` | The install script | not installed |
+| `install-macos.sh`, `install-windows.sh` | The install scripts, one for each system. `install-common.sh` holds the code they share | not installed |
 
 ## Pull requests panel
 
@@ -131,7 +160,7 @@ The Windows copy, `windows/herdr-app/mods/t3-prs/`, runs `gh` in WSL. It also li
 A `herdr-focus://<space-id>/<terminal>` link shows one terminal. The orchestrator puts one at the end of each report as `More:`.
 
 - Herdr draws the focus border only on the focused pane. So `herdr-focus.sh` changes the layout's focus colour to bright green for about 6 seconds, then puts the layout file back.
-- `herdr-focus.applescript` is the macOS program that opens these links. `herdr-focus-install.sh` builds it as `~/Applications/Herdr Focus.app` and tells macOS to use it for `herdr-focus://`. `install.sh` runs it.
+- `herdr-focus.applescript` is the macOS program that opens these links. `herdr-focus-install.sh` builds it as `~/Applications/Herdr Focus.app` and tells macOS to use it for `herdr-focus://`. `install-macos.sh` runs it.
 
 ## The orchestrator
 
@@ -174,7 +203,7 @@ Type `/claude` in the orchestrator to switch each idle or done omp terminal to C
 - A Claude terminal can report itself to Herdr as `claude` (from the hook) or `claude-code` (from Claude Code itself). Both count as Claude.
 - A terminal where omp or Claude stopped without a quit (for example, it was killed) runs only a shell. If its note holds a session with no `quit` mark, the report says `no agent runs; its omp session stopped` (or `Claude session`), and the terminal is not changed. Type `omp` or `claude` there to open the session again.
 
-Both commands need the Claude hook and refuse to run without it. Claude Code 2.1.326 and later report their own state (`claude-code`), but older versions do not, and only the hook writes each terminal's session note. The hook reports `claude-code` too. It does nothing for a `claude` that runs inside another omp or Claude. `install.sh` copies the hook and adds it to `~/.claude/settings.json`. Restart each Claude session so that it loads the hook.
+Both commands need the Claude hook and refuse to run without it. Claude Code 2.1.326 and later report their own state (`claude-code`), but older versions do not, and only the hook writes each terminal's session note. The hook reports `claude-code` too. It does nothing for a `claude` that runs inside another omp or Claude. Both install scripts copy the hook and add it to `~/.claude/settings.json`. Restart each Claude session so that it loads the hook.
 
 Limits:
 
@@ -214,7 +243,7 @@ On Windows, Herdr connects to its `wsl` machine over ssh: `Host wsl` in `%USERPR
 Two things run it:
 
 - Herdr itself. The Windows Spaces mod (`t3-spaces`) checks `hc machine ls` every 15 seconds. When the `wsl` machine is not connected, it runs the script, at most once a minute. This works however Herdr opens (Start menu, taskbar, a restart after an update), and also when WSL stops while Herdr is open. herdr-core connects again by itself a few seconds after sshd answers. No extra Herdr window ever opens.
-- Windows login. The Startup shortcut `Herdr WSL keepalive` runs the same script, so WSL is ready before Herdr opens. `install.sh` makes this shortcut.
+- Windows login. The Startup shortcut `Herdr WSL keepalive` runs the same script, so WSL is ready before Herdr opens. `install-windows.sh` makes this shortcut.
 
 While Herdr is open, WSL starts again within about a minute after `wsl --shutdown`. To keep WSL stopped, close Herdr first.
 
@@ -354,11 +383,11 @@ To check the collector from Windows (it always skips the live limits):
 powershell -NoProfile -File .\windows\herdr-app\mods\t3-usage\check-usage.ps1
 ```
 
-The check sets a fixed time and day. It checks the version 2 output, what the Claude status-line script keeps, current and old records, the Codex fallback, and that one provider's failure does not stop the other. It never calls a network service or a real Codex or Claude. To check the panel in the app, use `herdr-app check` and `herdr-app shot`. To put the repo's panel into the live Windows app, run `./install.sh` from WSL. Herdr loads layouts and mods by itself.
+The check sets a fixed time and day. It checks the version 2 output, what the Claude status-line script keeps, current and old records, the Codex fallback, and that one provider's failure does not stop the other. It never calls a network service or a real Codex or Claude. To check the panel in the app, use `herdr-app check` and `herdr-app shot`. To put the repo's panel into the live Windows app, run `./install-windows.sh` in WSL. Herdr loads layouts and mods by itself.
 
 ## Tests
 
-`tests/run.sh` runs `bun test tests/` in a sandbox: its own home folder, a test herdr-core session (`herdrtest`) and a test Herdr window. It uses fake `omp` and `claude` programs (`tests/fakes/fake-agent.ts`), so no test reaches your real window, terminals or state. `tests/install.test.ts` runs `install.sh --files-only` into a temporary home folder.
+`tests/run.sh` runs `bun test tests/` in a sandbox: its own home folder, a test herdr-core session (`herdrtest`) and a test Herdr window. It uses fake `omp` and `claude` programs (`tests/fakes/fake-agent.ts`), so no test reaches your real window, terminals or state. `tests/install.test.ts` runs `install-macos.sh --files-only` into a temporary home folder, and checks that `install-windows.sh` refuses to run on a Mac.
 
 ## Performance tests
 
