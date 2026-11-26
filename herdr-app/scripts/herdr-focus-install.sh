@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds ~/Applications/Herdr Focus.app from herdr-focus.applescript and makes it macOS's handler
-# for herdr-focus:// links. Run it again after a change to the .applescript; sync.sh --restore runs it.
+# for herdr-focus:// links. Run it again after a change to the .applescript; install.sh runs it.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 app="$HOME/Applications/Herdr Focus.app"
