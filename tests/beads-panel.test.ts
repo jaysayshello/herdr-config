@@ -71,7 +71,10 @@ test("shows the bead in progress, the next one, and the epic's tasks in order", 
 	expect(find(tree, `bead-now-${doing}`)).not.toBeNull();
 	expect(find(tree, `bead-next-${todo}`)).not.toBeNull();
 	expect(find(tree, `epic-${epic}`)).not.toBeNull();
-	for (const id of [doing, done, todo]) expect(find(tree, `bead-epic-${id}`)).not.toBeNull();
+	// The epic starts folded to its title and bar; a click opens its tasks in order.
+	expect(find(tree, `bead-epic-${doing}`)).toBeNull();
+	find(tree, `epic-${epic}`)!.handlers.on_click({}, vm.cx());
+	for (const id of [doing, done, todo]) expect(find(last(vm), `bead-epic-${id}`)).not.toBeNull();
 	// Outside the epic: counted, folded until clicked.
 	expect(find(tree, "beads-others")).not.toBeNull();
 	expect(find(tree, `bead-other-${docs}`)).toBeNull();
@@ -80,7 +83,7 @@ test("shows the bead in progress, the next one, and the epic's tasks in order", 
 	expect(about(p.beads.get(doing), p)).toEqual(["Adds the panel so you can see beads.", expect.stringMatching(/^Being worked on now/)]);
 	expect(about(p.beads.get(docs), p)[1]).toBe("Waiting on: Write it");
 	expect(about(p.beads.get(todo), p)[1]).toBe("Ready to start. Normal priority.");
-	expect(find(tree, `card-epic-${todo}`)).not.toBeNull();
+	expect(find(last(vm), `card-epic-${todo}`)).not.toBeNull();
 	// Reads only: nothing claimed or closed by the panel.
 	expect(bd(dir, "show", doing)[0].status).toBe("in_progress");
 }, 60_000);
